@@ -1,10 +1,13 @@
 """Vehicle filter engine - matches listings against markets_to_track_closely.xlsx."""
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import openpyxl
+
+logger = logging.getLogger(__name__)
 
 # Exclusion keywords for replica/kit car filtering (used by full system, not BaT-only)
 EXCLUSION_KEYWORDS = [
@@ -31,7 +34,12 @@ class VehicleFilter:
 
     def _load_filter_file(self, path: str | Path) -> None:
         wb = openpyxl.load_workbook(path, read_only=True)
-        ws = wb["closely"]
+        # Try expected sheet name, fall back to first sheet
+        try:
+            ws = wb["closely"]
+        except KeyError:
+            ws = wb.active
+            logger.warning(f"Sheet 'closely' not found, using active sheet: {ws.title}")
 
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         for row in rows:
@@ -127,13 +135,23 @@ class VehicleFilter:
 
         return aliases
 
+    # Legitimate builders whose products contain exclusion keywords
+    # but are NOT replicas (e.g. "Singer" builds are called "recreations" but are original products)
+    _LEGITIMATE_BUILDERS = {"singer", "gma", "gordon murray"}
+
     def _check_exclusions(self, title: str, excerpt: str = "") -> bool:
         """Return True if listing should be excluded."""
         combined = f"{title} {excerpt}".lower()
+
+        # First check if this is a legitimate builder's product
+        is_legitimate = any(builder in combined for builder in self._LEGITIMATE_BUILDERS)
+
         for kw in EXCLUSION_KEYWORDS:
             if kw in combined:
-                # Don't exclude legitimate factory continuation cars
-                if "singer" in combined or "gma" in combined or "t.50" in combined:
+                if is_legitimate:
+                    # "Singer recreation" is a real Singer, don't exclude.
+                    # But "Singer replica by Joe's Garage" would also pass —
+                    # acceptable tradeoff since Singer replicas don't exist.
                     return False
                 return True
         return False

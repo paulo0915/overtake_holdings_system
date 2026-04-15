@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 
+from shared.base_scraper import BaseScraper
 from shared.config import MAX_CONCURRENT_REQUESTS, MIN_PRICE_USD, REQUEST_DELAY_SECONDS, REQUEST_TIMEOUT
 from shared.fx_converter import FXConverter
 from shared.normalizer import (
@@ -65,23 +66,16 @@ def _parse_sold_text(sold_text: str | None) -> tuple[str, int | None, int | None
     return (status, selling_price, bid_price, date_str)
 
 
-class BaTScraper:
-    """Orchestrates BaT scraping with shared pipeline."""
+class BaTScraper(BaseScraper):
+    """Bring a Trailer scraper."""
 
-    def __init__(
-        self,
-        min_price: int = MIN_PRICE_USD,
-        output_dir: str | Path = "output",
-        max_concurrent: int = MAX_CONCURRENT_REQUESTS,
-        max_pages: int = 0,
-        vehicle_filter: VehicleFilter | None = None,
-    ):
-        self.min_price = min_price
-        self.output_dir = Path(output_dir)
-        self.max_concurrent = max_concurrent
-        self.max_pages = max_pages
+    SOURCE_NAME = "Bring a Trailer"
+    SOURCE_DOMAIN = "bringatrailer.com"
+    DATABASE = "auctions"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.parser = ListingParser()
-        self.vehicle_filter = vehicle_filter
         self._checkpoint_path = self.output_dir / ".checkpoint.json"
 
     async def run(self) -> list[dict]:

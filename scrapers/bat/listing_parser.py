@@ -432,7 +432,7 @@ class ListingParser:
             m = pattern.search(description)
             if m:
                 result["mileage_raw"] = m.group(1)
-                unit_str = m.group(2).lower() if m.lastindex >= 2 else "miles"
+                unit_str = m.group(2).lower() if m.lastindex and m.lastindex >= 2 and m.group(2) else "miles"
                 result["mileage_unit"] = "km" if unit_str.startswith("k") else "miles"
                 return
 
@@ -451,7 +451,6 @@ class ListingParser:
                 m = pat.search(description)
                 if m:
                     result["ext_color"] = m.group(1).strip()
-                    break
                     break
 
         # Interior color

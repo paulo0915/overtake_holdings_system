@@ -1,7 +1,6 @@
-"""Supabase database client — insert, upsert, dedup logic."""
+"""Supabase database client — batch insert, upsert, dedup logic."""
 
 import logging
-from typing import Any
 
 from supabase import create_client, Client
 
@@ -17,9 +16,7 @@ def get_client() -> Client:
     global _client
     if _client is None:
         if not SUPABASE_URL or not SUPABASE_KEY:
-            raise ValueError(
-                "SUPABASE_URL and SUPABASE_KEY must be set in .env"
-            )
+            raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in .env")
         _client = create_client(SUPABASE_URL, SUPABASE_KEY)
         logger.info("Supabase client initialized")
     return _client
@@ -27,36 +24,35 @@ def get_client() -> Client:
 
 # ── Auction Database ────────────────────────────────────────────
 
+AUCTION_BATCH_SIZE = 100
+
+
 def insert_auction_records(records: list[dict]) -> int:
     """
-    Insert auction records with dedup by Listing_url.
+    Batch-insert auction records with dedup by Listing_url.
 
-    Returns count of newly inserted records.
+    Uses upsert with on_conflict=Listing_url so the DB handles dedup
+    in a single call per batch instead of N+1 queries.
+
+    Returns count of records sent (DB silently skips duplicates).
     """
     client = get_client()
+
+    # Filter out records with no URL
+    valid = [r for r in records if r.get("Listing_url")]
+    if not valid:
+        return 0
+
     inserted = 0
+    for i in range(0, len(valid), AUCTION_BATCH_SIZE):
+        batch = valid[i:i + AUCTION_BATCH_SIZE]
+        client.table("auctions").upsert(
+            batch, on_conflict="Listing_url", ignore_duplicates=True,
+        ).execute()
+        inserted += len(batch)
+        logger.debug(f"Batch {i // AUCTION_BATCH_SIZE + 1}: sent {len(batch)} records")
 
-    for record in records:
-        url = record.get("Listing_url")
-        if not url:
-            continue
-
-        # Check if already exists
-        existing = (
-            client.table("auctions")
-            .select("Record_ID")
-            .eq("Listing_url", url)
-            .execute()
-        )
-
-        if existing.data:
-            logger.debug(f"Skipping duplicate auction: {url}")
-            continue
-
-        client.table("auctions").insert(record).execute()
-        inserted += 1
-
-    logger.info(f"Inserted {inserted}/{len(records)} auction records ({len(records) - inserted} duplicates skipped)")
+    logger.info(f"Sent {inserted} auction records to Supabase (duplicates ignored by DB)")
     return inserted
 
 
@@ -104,7 +100,6 @@ def upsert_classified_record(record: dict) -> str:
     if not url:
         return "skipped"
 
-    # Build query — match on all three fields
     query = client.table("classifieds").select("*").eq("Listing_url", url)
     if vin:
         query = query.eq("VIN", vin)
@@ -114,18 +109,17 @@ def upsert_classified_record(record: dict) -> str:
     existing = query.execute()
 
     if not existing.data:
-        # New listing
         record["Listing_status"] = "Active"
         client.table("classifieds").insert(record).execute()
         return "inserted"
 
     row = existing.data[0]
 
-    # Price change detection
+    # Price change detection — use `is not None` to handle zero prices correctly
     old_price = row.get("Asking_price")
     new_price = record.get("Asking_price")
 
-    if old_price and new_price and old_price != new_price:
+    if old_price is not None and new_price is not None and old_price != new_price:
         updates = {
             "Previous_asking_price": old_price,
             "Asking_price": new_price,
@@ -148,9 +142,10 @@ def upsert_classified_record(record: dict) -> str:
 
 def mark_removed_classifieds(source: str, active_urls: set[str]) -> int:
     """
-    Mark classifieds as 'Removed' if they were Active but not in current scrape.
+    Batch-mark classifieds as 'Removed' if Active but not in current scrape.
 
-    Returns count of removed listings.
+    Fetches all active Record_IDs for the source, filters locally,
+    then issues a single batch update for removed ones.
     """
     client = get_client()
 
@@ -162,17 +157,21 @@ def mark_removed_classifieds(source: str, active_urls: set[str]) -> int:
         .execute()
     )
 
-    removed = 0
-    for row in active_rows.data:
-        if row["Listing_url"] not in active_urls:
-            client.table("classifieds").update({
-                "Listing_status": "Removed",
-            }).eq("Record_ID", row["Record_ID"]).execute()
-            removed += 1
+    to_remove = [
+        row["Record_ID"] for row in active_rows.data
+        if row["Listing_url"] not in active_urls
+    ]
 
-    if removed:
-        logger.info(f"Marked {removed} classifieds as Removed for {source}")
-    return removed
+    if not to_remove:
+        return 0
+
+    # Batch update using IN filter
+    client.table("classifieds").update({
+        "Listing_status": "Removed",
+    }).in_("Record_ID", to_remove).execute()
+
+    logger.info(f"Marked {len(to_remove)} classifieds as Removed for {source}")
+    return len(to_remove)
 
 
 def check_relisted(vin: str, dealer: str, new_url: str) -> bool:

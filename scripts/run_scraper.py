@@ -78,6 +78,8 @@ def main() -> None:
     min_price = args.min_price if args.min_price is not None else MIN_PRICE_USD
     max_concurrent = args.max_concurrent if args.max_concurrent is not None else MAX_CONCURRENT_REQUESTS
 
+    records = []
+
     if args.source == "bat":
         from scrapers.bat.scraper import BaTScraper
         scraper = BaTScraper(
