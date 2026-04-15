@@ -1,0 +1,102 @@
+"""CLI entry point for running scrapers.
+
+Usage:
+    python scripts/run_scraper.py --source bat
+    python scripts/run_scraper.py --source bat --max-pages 2
+    python scripts/run_scraper.py --source bat --use-filter
+"""
+
+import asyncio
+import argparse
+import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+import sys
+
+# Ensure project root is on path
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+LOG_DIR = PROJECT_ROOT / "logs"
+LOG_FILE = LOG_DIR / "scraper.log"
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_BACKUP_COUNT = 5
+
+
+def setup_logging(verbose: bool = False) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+
+    LOG_DIR.mkdir(exist_ok=True)
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(logging.Formatter(fmt))
+    root.addHandler(console)
+
+    file_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8",
+    )
+    file_handler.setFormatter(logging.Formatter(fmt))
+    root.addHandler(file_handler)
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("hpack").setLevel(logging.WARNING)
+
+
+AVAILABLE_SOURCES = ["bat"]  # Add more as scrapers are built
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run auction/classified scraper")
+    parser.add_argument(
+        "--source", type=str, required=True, choices=AVAILABLE_SOURCES,
+        help="Which source to scrape",
+    )
+    parser.add_argument("--min-price", type=int, default=None, help="Override MIN_PRICE_USD")
+    parser.add_argument("--max-pages", type=int, default=0, help="Max API pages (0=unlimited, for testing)")
+    parser.add_argument("--max-concurrent", type=int, default=None, help="Override concurrency")
+    parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
+    parser.add_argument("--use-filter", action="store_true", help="Apply vehicle filter from tracking file")
+    parser.add_argument("--store-db", action="store_true", help="Write results to Supabase")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
+
+    args = parser.parse_args()
+    setup_logging(args.verbose)
+
+    from shared.config import MIN_PRICE_USD, MAX_CONCURRENT_REQUESTS, VEHICLE_FILTER_FILE
+
+    # Vehicle filter (optional)
+    vehicle_filter = None
+    if args.use_filter:
+        from shared.vehicle_filter import VehicleFilter
+        vehicle_filter = VehicleFilter(VEHICLE_FILTER_FILE)
+        logging.getLogger(__name__).info(f"Vehicle filter loaded from {VEHICLE_FILTER_FILE}")
+
+    min_price = args.min_price if args.min_price is not None else MIN_PRICE_USD
+    max_concurrent = args.max_concurrent if args.max_concurrent is not None else MAX_CONCURRENT_REQUESTS
+
+    if args.source == "bat":
+        from scrapers.bat.scraper import BaTScraper
+        scraper = BaTScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
+    # Store to Supabase if requested
+    if args.store_db and records:
+        from shared.db import insert_auction_records
+        inserted = insert_auction_records(records)
+        print(f"Stored {inserted} records to Supabase")
+
+    print(f"\nDone! {len(records)} records exported to {args.output_dir}/")
+
+
+if __name__ == "__main__":
+    main()
