@@ -46,7 +46,7 @@ def setup_logging(verbose: bool = False) -> None:
     logging.getLogger("hpack").setLevel(logging.WARNING)
 
 
-AVAILABLE_SOURCES = ["bat", "cab"]  # Add more as scrapers are built
+AVAILABLE_SOURCES = ["bat", "cab", "pcar"]  # Add more as scrapers are built
 
 
 def main() -> None:
@@ -102,6 +102,17 @@ def main() -> None:
         )
         # C&B uses sync Playwright — run directly, not in asyncio
         records = scraper.run_sync()
+
+    elif args.source == "pcar":
+        from scrapers.pcarmarket.scraper import PCarMarketScraper
+        scraper = PCarMarketScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
 
     # Store to Supabase if requested
     if args.store_db and records:
