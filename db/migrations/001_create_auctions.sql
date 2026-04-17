@@ -7,7 +7,6 @@ CREATE TABLE IF NOT EXISTS auctions (
     Year            INTEGER,
     Make            TEXT,
     Model           TEXT,
-    Authenticity    TEXT DEFAULT 'Original',
     VIN             TEXT,
     Mileage_mi      INTEGER,
     Ext_color       TEXT,

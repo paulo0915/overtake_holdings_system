@@ -1,7 +1,5 @@
 """Cars & Bids specific configuration."""
 
-from shared.config import MIN_PRICE_USD, MAX_CONCURRENT_REQUESTS, REQUEST_DELAY_SECONDS
-
 CAB_BASE_URL = "https://carsandbids.com"
 CAB_API_BASE = "https://carsandbids.com/v2/autos/auctions"
 CAB_RESULTS_PER_PAGE = 50

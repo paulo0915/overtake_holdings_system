@@ -1,69 +1,26 @@
-"""BaT scraper — uses shared pipeline for normalization, filtering, export."""
+"""BaT scraper — thin async orchestrator: warmup, checkpoint, page fetching, export."""
 
 import asyncio
-import html as html_lib
 import json
 import logging
 import random
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import httpx
 
 from shared.base_scraper import BaseScraper
-from shared.config import MAX_CONCURRENT_REQUESTS, MIN_PRICE_USD, REQUEST_DELAY_SECONDS, REQUEST_TIMEOUT
+from shared.config import REQUEST_DELAY_SECONDS, REQUEST_TIMEOUT
+from shared.export import export_to_csv, export_to_excel
 from shared.fx_converter import FXConverter
-from shared.normalizer import (
-    country_code_to_name,
-    format_selling_date,
-    get_scraped_at,
-    normalize_engine_spec,
-    normalize_mileage,
-    normalize_transmission,
-    parse_make_model_from_title,
-    parse_year_from_title,
-    unescape,
-)
+from shared.normalizer import get_scraped_at
 from shared.schemas import AUCTION_COLUMNS
-from shared.vehicle_filter import VehicleFilter
 
 from .api_client import BaTAPIClient
 from .config import get_page_headers
 from .listing_parser import ListingParser
+from .record_builder import build_records
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_sold_text(sold_text: str | None) -> tuple[str, int | None, int | None, str | None]:
-    """Parse BaT sold_text. Returns (status, selling_price, bid_price, date_str)."""
-    import re
-
-    if not sold_text:
-        return ("Withdrawn", None, None, None)
-
-    sold_text = sold_text.strip()
-
-    if sold_text.lower().startswith("sold"):
-        status = "Sold"
-    elif sold_text.lower().startswith("bid to"):
-        status = "Unsold"
-    elif "withdrawn" in sold_text.lower():
-        status = "Withdrawn"
-    else:
-        status = "Unsold"
-
-    price_match = re.search(r'(?:[\$€£]|CHF)\s*([\d,]+)', sold_text)
-    price = int(price_match.group(1).replace(",", "")) if price_match else None
-
-    date_match = re.search(r'on\s+(\d{1,2})/(\d{1,2})/(\d{4})', sold_text)
-    date_str = None
-    if date_match:
-        month, day, year = int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3))
-        date_str = f"{year:04d}-{month:02d}-{day:02d}"
-
-    selling_price = price if status == "Sold" else None
-    bid_price = price if status == "Unsold" else None
-    return (status, selling_price, bid_price, date_str)
 
 
 class BaTScraper(BaseScraper):
@@ -92,7 +49,6 @@ class BaTScraper(BaseScraper):
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         async with httpx.AsyncClient(http2=True, follow_redirects=True) as client:
-            # Session warmup
             await self._warmup_session(client)
 
             # Step 1: API pagination (or resume from checkpoint)
@@ -109,7 +65,7 @@ class BaTScraper(BaseScraper):
                 logger.warning("No listings found. Exiting.")
                 return []
 
-            # Step 2: Fetch listing pages (with resume)
+            # Step 2: Fetch listing HTML pages (with resume)
             already_parsed = checkpoint.get("parsed_details", {}) if checkpoint else {}
             if already_parsed:
                 logger.info(f"Checkpoint has {len(already_parsed)} already-parsed listings")
@@ -119,13 +75,15 @@ class BaTScraper(BaseScraper):
                 client, raw_listings, semaphore, already_parsed
             )
 
-            # Step 3: Build + normalize + filter records
+            # Step 3: Normalize, filter, assemble records
             fx_converter = FXConverter(client)
-            records = await self._build_records(raw_listings, details, fx_converter)
+            scraped_at = get_scraped_at()
+            records = await build_records(
+                raw_listings, details, fx_converter, self.vehicle_filter, scraped_at
+            )
             logger.info(f"Built {len(records)} final records")
 
             # Step 4: Export CSV/Excel
-            from shared.export import export_to_csv, export_to_excel
             csv_path = self.output_dir / "bat_auction_results.csv"
             excel_path = self.output_dir / "bat_auction_results.xlsx"
             export_to_csv(records, csv_path, AUCTION_COLUMNS)
@@ -170,8 +128,10 @@ class BaTScraper(BaseScraper):
 
     def _save_checkpoint(self, api_listings: list[dict], parsed_details: dict[str, dict]) -> None:
         self._checkpoint_path.write_text(
-            json.dumps({"api_listings": api_listings, "parsed_details": parsed_details},
-                       ensure_ascii=False, default=str),
+            json.dumps(
+                {"api_listings": api_listings, "parsed_details": parsed_details},
+                ensure_ascii=False, default=str,
+            ),
             encoding="utf-8",
         )
 
@@ -180,9 +140,9 @@ class BaTScraper(BaseScraper):
             self._checkpoint_path.unlink()
             logger.info("Checkpoint cleaned up")
 
-    # ── Listing page fetching ───────────────────────────────
+    # ── Listing HTML page fetching ──────────────────────────
 
-    async def _fetch_single_listing(self, client, url, semaphore) -> str | None:
+    async def _fetch_single_listing(self, client: httpx.AsyncClient, url: str, semaphore) -> str | None:
         async with semaphore:
             for attempt in range(3):
                 try:
@@ -194,19 +154,27 @@ class BaTScraper(BaseScraper):
                         continue
                     resp.raise_for_status()
                     html = resp.text
-                    if any(s in html[:5000] for s in ("cf-browser-verification", "cf_chl_opt", "Just a moment...")):
+                    if any(s in html[:5000] for s in
+                           ("cf-browser-verification", "cf_chl_opt", "Just a moment...")):
                         await asyncio.sleep(15 * (attempt + 1) + random.uniform(0, 5))
                         continue
                     await asyncio.sleep(REQUEST_DELAY_SECONDS + random.uniform(0.5, 2.0))
                     return html
-                except (httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
+                except (httpx.HTTPStatusError, httpx.ConnectError,
+                        httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
                     if attempt == 2:
                         logger.warning(f"Failed {url} after 3 attempts: {e}")
                         return None
                     await asyncio.sleep(3 * (attempt + 1) + random.uniform(0, 2))
         return None
 
-    async def _fetch_listing_details(self, client, listings, semaphore, already_parsed):
+    async def _fetch_listing_details(
+        self,
+        client: httpx.AsyncClient,
+        listings: list[dict],
+        semaphore,
+        already_parsed: dict[str, dict],
+    ) -> dict[str, dict]:
         results = dict(already_parsed)
         to_fetch = [i for i in listings if i.get("url", "") not in results]
 
@@ -218,7 +186,7 @@ class BaTScraper(BaseScraper):
         loop = asyncio.get_running_loop()
         executor = ThreadPoolExecutor(max_workers=self.max_concurrent)
 
-        async def fetch_and_parse(item):
+        async def fetch_and_parse(item: dict) -> tuple[str, dict]:
             url = item.get("url", "")
             try:
                 html = await self._fetch_single_listing(client, url, semaphore)
@@ -244,112 +212,3 @@ class BaTScraper(BaseScraper):
         executor.shutdown(wait=True)
         self._save_checkpoint(listings, results)
         return results
-
-    # ── Record building ─────────────────────────────────────
-
-    async def _build_records(self, listings, details, fx_converter):
-        records = []
-        scraped_at = get_scraped_at()
-        seen_urls: set[str] = set()
-        skipped = {"parts": 0, "invalid": 0, "filter": 0, "dup": 0}
-
-        for item in listings:
-            url = item.get("url", "")
-            if url in seen_urls:
-                skipped["dup"] += 1
-                continue
-            seen_urls.add(url)
-
-            title = html_lib.unescape(item.get("title", ""))
-            detail = details.get(url, {})
-
-            if not detail.get("is_valid_listing", True):
-                skipped["invalid"] += 1
-                continue
-            if detail.get("is_parts", False):
-                skipped["parts"] += 1
-                continue
-
-            # Make & Model
-            make = detail.get("make") or None
-            model = detail.get("model") or None
-            if not make:
-                make, model = parse_make_model_from_title(title)
-                make = make or None
-                model = model or None
-
-            # Vehicle filter
-            if self.vehicle_filter and make:
-                match = self.vehicle_filter.match(title, "")
-                if not match:
-                    skipped["filter"] += 1
-                    continue
-
-            # Sold text
-            sold_text = item.get("sold_text", "")
-            sold_status, selling_price, bid_price, selling_date_str = _parse_sold_text(sold_text)
-            selling_date = format_selling_date(item.get("timestamp_end"), selling_date_str)
-
-            year = detail.get("year") or parse_year_from_title(title)
-            mileage = normalize_mileage(detail.get("mileage_raw"), detail.get("mileage_unit"))
-            transmission = normalize_transmission(detail.get("transmission_raw"))
-            engine = normalize_engine_spec(detail.get("engine_spec"))
-
-            # FX
-            currency = item.get("currency", "USD")
-            price_usd, fx_rate = (None, None)
-            bid_price_usd = None
-
-            if selling_price is not None:
-                price_usd, fx_rate = await fx_converter.convert_to_usd(selling_price, currency, selling_date)
-            if bid_price is not None:
-                bid_price_usd, bid_fx = await fx_converter.convert_to_usd(bid_price, currency, selling_date)
-                if fx_rate is None:
-                    fx_rate = bid_fx
-
-            country = country_code_to_name(item.get("country_code"))
-            image_url = item.get("thumbnail_url")
-            if image_url and "?resize=" in image_url:
-                image_url = image_url.split("?resize=")[0]
-
-            bat_id = item.get("id")
-
-            records.append({
-                "Record_ID": str(bat_id) if bat_id else url,
-                "Title": title,
-                "Year": year,
-                "Make": make,
-                "Model": model,
-                "Authenticity": detail.get("authenticity", "Original"),
-                "VIN": detail.get("vin"),
-                "Mileage_mi": mileage,
-                "Ext_color": unescape(detail.get("ext_color")),
-                "Int_color": unescape(detail.get("int_color")),
-                "Engine_spec": engine,
-                "Transmission": transmission,
-                "Lot_number": detail.get("lot_number"),
-                "Estimate_low": None,
-                "Estimate_high": None,
-                "Estimate_currency": None,
-                "Sold_status": sold_status,
-                "Currency": currency,
-                "Selling_price": selling_price,
-                "Selling_price_USD": price_usd,
-                "Bid_price": bid_price,
-                "Bid_price_USD": bid_price_usd,
-                "Bid_count": detail.get("bid_count"),
-                "FX_rate_used": fx_rate,
-                "Selling_date": selling_date,
-                "Auction_house": "Bring a Trailer",
-                "Country": country,
-                "Image_url": image_url,
-                "Listing_url": url,
-                "Source": "bringatrailer.com",
-                "Listing_description": detail.get("listing_description"),
-                "Scraped_at": scraped_at,
-            })
-
-        for k, v in skipped.items():
-            if v:
-                logger.info(f"Skipped {v} ({k})")
-        return records

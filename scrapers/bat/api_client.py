@@ -8,13 +8,12 @@ from typing import Any
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+from shared.config import REQUEST_DELAY_SECONDS, REQUEST_TIMEOUT, MIN_PRICE_USD
+
 from .config import (
     BAT_API_BASE,
     BAT_RESULTS_PER_PAGE,
     BAT_SORT,
-    REQUEST_DELAY_SECONDS,
-    REQUEST_TIMEOUT,
-    MIN_PRICE_USD,
     get_api_headers,
 )
 

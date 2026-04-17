@@ -6,6 +6,8 @@ import re
 
 from bs4 import BeautifulSoup
 
+from shared.normalizer import extract_description_fields
+
 logger = logging.getLogger(__name__)
 
 # Patterns for parts/memorabilia detection
@@ -16,11 +18,6 @@ _PARTS_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
-# Authenticity detection
-_RECREATION_KEYWORDS = re.compile(
-    r'\b(?:re-?creation|replica|evocation)\b',
-    re.IGNORECASE,
-)
 
 # Mileage in essentials bullets
 # Matches: "161 Miles", "22,000 Miles Shown", "48k Kilometers Shown", "3,262 Miles TMU"
@@ -81,7 +78,6 @@ class ListingParser:
         result = {
             "is_valid_listing": True,
             "is_parts": False,
-            "authenticity": "Original",
             "make": None,
             "model": None,
             "vin": None,
@@ -126,11 +122,6 @@ class ListingParser:
                 or "parts" in make_tag.lower()
                 or "automobilia" in make_tag.lower()):
             result["is_parts"] = True
-
-        # Authenticity — only check title (description has too many false positives
-        # like "replica livery", "replica tool roll" that aren't replica cars)
-        if _RECREATION_KEYWORDS.search(title_text):
-            result["authenticity"] = "Re-Creation"
 
         # Model: everything after Make in the title
         if result["make"] and title_text:
@@ -437,56 +428,20 @@ class ListingParser:
                 return
 
     def _fallback_from_description(self, description: str, result: dict) -> None:
-        """Extract missing fields from listing description text."""
-        # Exterior color
+        """Fill missing fields from listing description text via shared extractor."""
+        if not (result["ext_color"] is None or result["int_color"] is None
+                or result["engine_spec"] is None or result["transmission_raw"] is None):
+            return
+
+        fields = extract_description_fields(description)
+
         if result["ext_color"] is None:
-            # Stop capturing at common non-color words
-            _COLOR_STOP = r'(?=\s+(?:over|with|and\s+\w+\s+leather|leather|paint|upholstery|interior|exterior|carbon|powered|featuring|,|\.))'
-            patterns = [
-                re.compile(r'(?:finished|painted|wrapped)\s+in\s+([A-Z][A-Za-z]+(?:[\s-]+[A-Za-z]+){0,2})' + _COLOR_STOP, re.IGNORECASE),
-                re.compile(r'(?:finished|painted|wrapped)\s+in\s+([A-Z][A-Za-z]+(?:[\s-]+[A-Za-z]+){0,2})', re.IGNORECASE),
-                re.compile(r'(?:exterior\s+is|exterior\s+color\s*(?:is)?)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})', re.IGNORECASE),
-            ]
-            for pat in patterns:
-                m = pat.search(description)
-                if m:
-                    result["ext_color"] = m.group(1).strip()
-                    break
-
-        # Interior color
+            result["ext_color"] = fields["ext_color"]
         if result["int_color"] is None:
-            patterns = [
-                re.compile(r'over\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,3})\s+(?:leather|alcantara|suede|interior|upholstery)', re.IGNORECASE),
-                re.compile(r'(?:interior\s+is|interior\s+in)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,3})', re.IGNORECASE),
-            ]
-            for pat in patterns:
-                m = pat.search(description)
-                if m:
-                    result["int_color"] = m.group(1).strip()
-                    break
-
-        # Engine
+            result["int_color"] = fields["int_color"]
         if result["engine_spec"] is None:
-            m = re.search(
-                r'((?:naturally[- ]aspirated|twin[- ]turbocharged|quad[- ]turbocharged|'
-                r'supercharged|turbocharged)\s+)?'
-                r'([\d.]+[- ](?:liter|litre)\s+(?:DOHC\s+|SOHC\s+|OHV\s+)?'
-                r'(?:V\d+|W\d+|flat[- ]?\d+|inline[- ]?\d+|straight[- ]?\d+|[A-Z]\d+[A-Za-z]*))',
-                description,
-                re.IGNORECASE,
-            )
-            if m:
-                engine = ((m.group(1) or "") + m.group(2)).strip()
-                result["engine_spec"] = engine
-
-        # Transmission
+            result["engine_spec"] = fields["engine"]
         if result["transmission_raw"] is None:
-            m = re.search(
-                r'(\w+[- ]speed\s+(?:manual|automatic|PDK|DCT|dual[- ]clutch|'
-                r'sequential|tiptronic|S-tronic|SMG|F1|e-gear|ISR)'
-                r'(?:\s+(?:transmission|transaxle|gearbox))?)',
-                description,
-                re.IGNORECASE,
-            )
-            if m:
-                result["transmission_raw"] = m.group(1).strip()
+            # normalize_transmission already applied inside extract_description_fields;
+            # normalize_transmission is idempotent so re-calling it in scraper.py is safe.
+            result["transmission_raw"] = fields["transmission"]

@@ -67,7 +67,6 @@ _COLUMN_DESCRIPTIONS = {
     "Year": "Model year (4-digit YYYY).",
     "Make": "Manufacturer name from source structured data.",
     "Model": "Full model name + variant.",
-    "Authenticity": "'Original' or 'Re-Creation'. Flagged from title keywords.",
     "VIN": "VIN or chassis number. 17-char VIN preferred.",
     "Mileage_mi": "Odometer in miles. KM converted. Priority: title > sidebar > description.",
     "Ext_color": "Exterior colour from sidebar or description.",

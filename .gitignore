@@ -27,8 +27,8 @@ Thumbs.db
 # Debug
 debug_*.html
 
-# Checkpoint
-.checkpoint.json
+# Checkpoint files
+.*checkpoint*.json
 
 # Old standalone scraper (kept for reference)
 bat_scraper/
