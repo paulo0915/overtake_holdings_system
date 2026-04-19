@@ -214,6 +214,7 @@ _NON_COLOR_WORDS = frozenset({
     "custom", "factory", "original", "pure", "modern", "classic", "sport",
     "luxury", "premium", "exclusive", "functional", "race", "track",
     "stripped", "spartan", "purpose", "built", "open", "full", "partial",
+    "optional",  # e.g. "with optional leather" in Hagerty / dealer copy
 })
 
 # Engine patterns — ordered by confidence/specificity.
@@ -259,36 +260,52 @@ _DESC_TRANSMISSION_PATTERNS = [
     re.compile(r'\b(PDK|manual transmission|automatic transmission)\b', re.IGNORECASE),
 ]
 
+# Stop-word set used in ext_color lookahead and int_color suffix guard.
+_COLOR_STOP_WORDS = (
+    r'over|with|and\b|accented|by\b|featuring|powered|carbon|,|\.|'
+    r'leather|alcantara|suede|nappa|interior|upholstery|exterior'
+)
+
 _DESC_EXT_COLOR_PATTERNS = [
+    # Pattern A: lookahead stops capture at prepositions/descriptors.
+    # Uses {0,1} (not {0,2}) so greedy match cannot swallow a word that then
+    # satisfies the lookahead via a word further downstream.
     re.compile(
-        r'(?:finished|painted|wrapped)\s+in\s+([A-Z][A-Za-z]+(?:[\s-]+[A-Za-z]+){0,2})'
-        r'(?=\s+(?:over|with|and|,|\.|leather|interior|carbon|powered|featuring))',
+        r'(?:finished|painted|wrapped)\s+in\s+([A-Z][A-Za-z]+(?:[\s-]+[A-Za-z]+){0,1})'
+        r'(?=\s+(?:' + _COLOR_STOP_WORDS + r'))',
+        re.IGNORECASE,
+    ),
+    # Pattern B: no lookahead fallback — at most 1 additional word.
+    re.compile(
+        r'(?:finished|painted|wrapped)\s+in\s+([A-Z][A-Za-z]+(?:[\s-]+[A-Za-z]+){0,1})',
         re.IGNORECASE,
     ),
     re.compile(
-        r'(?:finished|painted|wrapped)\s+in\s+([A-Z][A-Za-z]+(?:[\s-]+[A-Za-z]+){0,2})',
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r'(?:exterior\s+is|exterior\s+color\s*(?:is)?)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})',
+        r'(?:exterior\s+is|exterior\s+color\s*(?:is)?)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,1})',
         re.IGNORECASE,
     ),
 ]
 
 _DESC_INT_COLOR_PATTERNS = [
+    # Negative lookahead inside the optional suffix prevents the capture group
+    # from consuming the terminal stop-word (e.g. "black leather" → "black").
     re.compile(
-        r'over\s+(?:a\s+|an\s+)?([A-Z][A-Za-z]+(?:\s+[A-Za-z]+)?)\s+'
-        r'(?:leather|alcantara|suede|interior|upholstery)',
+        r'over\s+(?:a\s+|an\s+)?'
+        r'([A-Z][A-Za-z]+(?:\s+(?!leather|alcantara|suede|nappa|interior|upholstery)[A-Za-z]+)?)'
+        r'\s+(?:leather|alcantara|suede|nappa|interior|upholstery)',
         re.IGNORECASE,
     ),
     re.compile(
-        r'with\s+(?:a\s+|an\s+)?([A-Z][A-Za-z]+(?:\s+[A-Za-z]+)?)\s+'
-        r'(?:leather|alcantara|suede|interior|upholstery)',
+        r'with\s+(?:a\s+|an\s+)?'
+        r'([A-Z][A-Za-z]+(?:\s+(?!leather|alcantara|suede|nappa|interior|upholstery)[A-Za-z]+)?)'
+        r'\s+(?:leather|alcantara|suede|nappa|interior|upholstery)',
         re.IGNORECASE,
     ),
     re.compile(r'([A-Z][A-Za-z]+)\s+leather\s+interior', re.IGNORECASE),
+    # Stop at common prepositions/conjunctions that follow the color name.
     re.compile(
-        r'(?:interior\s+is|interior\s+in)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,3})',
+        r'(?:interior\s+is|interior\s+in)\s+'
+        r'([A-Za-z]+(?:\s+(?!with\b|and\b|or\b|by\b|from\b)[A-Za-z]+){0,1})',
         re.IGNORECASE,
     ),
 ]
