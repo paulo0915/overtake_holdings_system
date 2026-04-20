@@ -5,6 +5,7 @@ Usage:
     python scripts/run_scraper.py --source bat --max-pages 2
     python scripts/run_scraper.py --source bat --use-filter
     python scripts/run_scraper.py --source hag --min-price 250000 --max-pages 3
+    python scripts/run_scraper.py --source dpl --max-pages 1 --min-price 400000
 """
 
 import asyncio
@@ -47,7 +48,7 @@ def setup_logging(verbose: bool = False) -> None:
     logging.getLogger("hpack").setLevel(logging.WARNING)
 
 
-AVAILABLE_SOURCES = ["bat", "cab", "pcar", "hag"]  # hag = Hagerty Marketplace
+AVAILABLE_SOURCES = ["bat", "cab", "pcar", "hag", "dpl"]  # hag, dpl = Hagerty / DuPont Live
 
 
 def main() -> None:
@@ -118,6 +119,17 @@ def main() -> None:
     elif args.source == "hag":
         from scrapers.hagerty.scraper import HagertyMarketplaceScraper
         scraper = HagertyMarketplaceScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
+    elif args.source == "dpl":
+        from scrapers.dupont_live.scraper import DuPontLiveScraper
+        scraper = DuPontLiveScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
