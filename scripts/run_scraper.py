@@ -1,5 +1,12 @@
 """CLI entry point for running scrapers.
 
+Scraper structure
+-----------------
+scrapers/
+  daily/    bat, cab, pcar, hag, dpl, sbm
+  monthly/  (future)
+  event/    (Traditional Auction Houses — manual by client)
+
 Usage:
     python scripts/run_scraper.py --source bat
     python scripts/run_scraper.py --source bat --max-pages 2
@@ -88,8 +95,9 @@ def main() -> None:
 
     records = []
 
+    # ── Daily scrapers ─────────────────────────────────────────────────────────
     if args.source == "bat":
-        from scrapers.bat.scraper import BaTScraper
+        from scrapers.daily.bat.scraper import BaTScraper
         scraper = BaTScraper(
             min_price=min_price,
             output_dir=args.output_dir,
@@ -100,7 +108,7 @@ def main() -> None:
         records = asyncio.run(scraper.run())
 
     elif args.source == "cab":
-        from scrapers.cars_and_bids.scraper import CarsAndBidsScraper
+        from scrapers.daily.cars_and_bids.scraper import CarsAndBidsScraper
         scraper = CarsAndBidsScraper(
             min_price=min_price,
             output_dir=args.output_dir,
@@ -112,7 +120,7 @@ def main() -> None:
         records = scraper.run_sync()
 
     elif args.source == "pcar":
-        from scrapers.pcarmarket.scraper import PCarMarketScraper
+        from scrapers.daily.pcarmarket.scraper import PCarMarketScraper
         scraper = PCarMarketScraper(
             min_price=min_price,
             output_dir=args.output_dir,
@@ -123,7 +131,7 @@ def main() -> None:
         records = asyncio.run(scraper.run())
 
     elif args.source == "hag":
-        from scrapers.hagerty.scraper import HagertyMarketplaceScraper
+        from scrapers.daily.hagerty.scraper import HagertyMarketplaceScraper
         scraper = HagertyMarketplaceScraper(
             min_price=min_price,
             output_dir=args.output_dir,
@@ -134,7 +142,7 @@ def main() -> None:
         records = asyncio.run(scraper.run())
 
     elif args.source == "dpl":
-        from scrapers.dupont_live.scraper import DuPontLiveScraper
+        from scrapers.daily.dupont_live.scraper import DuPontLiveScraper
         scraper = DuPontLiveScraper(
             min_price=min_price,
             output_dir=args.output_dir,
@@ -145,7 +153,7 @@ def main() -> None:
         records = asyncio.run(scraper.run())
 
     elif args.source == "sbm":
-        from scrapers.sothebys_motorsport.scraper import SothebysMotorsportScraper
+        from scrapers.daily.sothebys_motorsport.scraper import SothebysMotorsportScraper
         scraper = SothebysMotorsportScraper(
             min_price=min_price,
             output_dir=args.output_dir,
