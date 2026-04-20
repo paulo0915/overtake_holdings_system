@@ -3,9 +3,9 @@
 Scraper structure
 -----------------
 scrapers/
-  daily/    bat, cab, pcar, hag, dpl, sbm
-  monthly/  (future)
-  event/    (Traditional Auction Houses — manual by client)
+  daily/     bat, cab, pcar, hag, dpl, sbm
+  monthly/   mbm (The MB Market), …
+  event/     (Traditional Auction Houses — manual by client)
 
 Usage:
     python scripts/run_scraper.py --source bat
@@ -14,6 +14,7 @@ Usage:
     python scripts/run_scraper.py --source hag --min-price 250000 --max-pages 3
     python scripts/run_scraper.py --source dpl --max-pages 1 --min-price 400000
     python scripts/run_scraper.py --source sbm --max-pages 1 --min-price 100000
+    python scripts/run_scraper.py --source mbm --max-pages 2 --min-price 5000
 """
 
 import asyncio
@@ -61,7 +62,10 @@ def setup_logging(verbose: bool = False) -> None:
     logging.getLogger("hpack").setLevel(logging.WARNING)
 
 
-AVAILABLE_SOURCES = ["bat", "cab", "pcar", "hag", "dpl", "sbm"]  # hag, dpl, sbm = Hagerty / DuPont / Sotheby's
+AVAILABLE_SOURCES = [
+    "bat", "cab", "pcar", "hag", "dpl", "sbm",  # daily
+    "mbm",  # monthly — The MB Market
+]
 
 
 def main() -> None:
@@ -155,6 +159,18 @@ def main() -> None:
     elif args.source == "sbm":
         from scrapers.daily.sothebys_motorsport.scraper import SothebysMotorsportScraper
         scraper = SothebysMotorsportScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
+    # ── Monthly scrapers ───────────────────────────────────────────────────────
+    elif args.source == "mbm":
+        from scrapers.monthly.the_mb_market.scraper import TheMbMarketScraper
+        scraper = TheMbMarketScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
