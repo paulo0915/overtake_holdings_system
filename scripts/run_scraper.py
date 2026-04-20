@@ -4,7 +4,7 @@ Scraper structure
 -----------------
 scrapers/
   daily/     bat, cab, pcar, hag, dpl, sbm
-  monthly/   mbm (The MB Market), sbx (SBX Cars), …
+  monthly/   mbm (The MB Market), sbx (SBX Cars), cbk (Carbuckle), …
   event/     (Traditional Auction Houses — manual by client)
 
 Usage:
@@ -16,6 +16,7 @@ Usage:
     python scripts/run_scraper.py --source sbm --max-pages 1 --min-price 100000
     python scripts/run_scraper.py --source mbm --max-pages 2 --min-price 5000
     python scripts/run_scraper.py --source sbx --max-pages 5 --min-price 100000
+    python scripts/run_scraper.py --source cbk --max-pages 2 --min-price 10000
 """
 
 import asyncio
@@ -67,6 +68,7 @@ AVAILABLE_SOURCES = [
     "bat", "cab", "pcar", "hag", "dpl", "sbm",  # daily
     "mbm",  # monthly — The MB Market
     "sbx",  # monthly — SBX Cars
+    "cbk",  # monthly — Carbuckle
 ]
 
 
@@ -184,6 +186,17 @@ def main() -> None:
     elif args.source == "sbx":
         from scrapers.monthly.sbx_cars.scraper import SbxCarsScraper
         scraper = SbxCarsScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
+    elif args.source == "cbk":
+        from scrapers.monthly.carbuckle.scraper import CarbuckleScraper
+        scraper = CarbuckleScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,

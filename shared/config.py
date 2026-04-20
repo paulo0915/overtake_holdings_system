@@ -24,7 +24,7 @@ VEHICLE_FILTER_FILE = _PROJECT_ROOT / os.getenv(
 )
 
 # === FX ===
-FRANKFURTER_API_BASE = os.getenv("FRANKFURTER_API_BASE", "https://api.frankfurter.app")
+FRANKFURTER_API_BASE = os.getenv("FRANKFURTER_API_BASE", "https://api.frankfurter.dev/v1")
 
 # === Scraper settings ===
 REQUEST_TIMEOUT = 30

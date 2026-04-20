@@ -50,10 +50,22 @@ class FXConverter:
         If the exact date is a weekend/holiday, Frankfurter returns the
         closest previous business day rate.
 
+        If ``date_str`` is in the future (e.g. mis-set ``dateEnd`` on a listing),
+        it is clamped to today's UTC date — ECB/Frankfurter has no future rates.
+
         Returns 1.0 if currency is already USD.
         """
         if from_currency.upper() == "USD":
             return 1.0
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if date_str > today:
+            logger.debug(
+                "FX date %s is in the future; using %s for Frankfurter lookup",
+                date_str,
+                today,
+            )
+            date_str = today
 
         try:
             return await self._fetch_rate(date_str, from_currency)
