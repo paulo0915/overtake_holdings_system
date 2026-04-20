@@ -6,14 +6,20 @@ Usage:
     python scripts/run_scraper.py --source bat --use-filter
     python scripts/run_scraper.py --source hag --min-price 250000 --max-pages 3
     python scripts/run_scraper.py --source dpl --max-pages 1 --min-price 400000
+    python scripts/run_scraper.py --source sbm --max-pages 1 --min-price 100000
 """
 
 import asyncio
 import argparse
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-import sys
+
+# curl_cffi requires the selector event loop on Windows (ProactorEventLoop lacks
+# add_reader which curl_cffi's async internals need).
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # Ensure project root is on path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -48,7 +54,7 @@ def setup_logging(verbose: bool = False) -> None:
     logging.getLogger("hpack").setLevel(logging.WARNING)
 
 
-AVAILABLE_SOURCES = ["bat", "cab", "pcar", "hag", "dpl"]  # hag, dpl = Hagerty / DuPont Live
+AVAILABLE_SOURCES = ["bat", "cab", "pcar", "hag", "dpl", "sbm"]  # hag, dpl, sbm = Hagerty / DuPont / Sotheby's
 
 
 def main() -> None:
@@ -130,6 +136,17 @@ def main() -> None:
     elif args.source == "dpl":
         from scrapers.dupont_live.scraper import DuPontLiveScraper
         scraper = DuPontLiveScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
+    elif args.source == "sbm":
+        from scrapers.sothebys_motorsport.scraper import SothebysMotorsportScraper
+        scraper = SothebysMotorsportScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
