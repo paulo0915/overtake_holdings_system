@@ -5,7 +5,7 @@ Scraper structure
 scrapers/
     daily/     bat, cab, pcar, hag, dpl, sbm
     monthly/   mbm (The MB Market), sbx (SBX Cars), cbk (Carbuckle), …
-    event/     mecum (Mecum Auctions — Algolia + lot pages)
+    event/     mecum, barrett, broadarrow
 
 Usage:
     python scripts/run_scraper.py --source bat
@@ -22,6 +22,7 @@ Usage:
     python scripts/run_scraper.py --source cac --max-pages 1 --min-price 0
     python scripts/run_scraper.py --source mecum --max-pages 1 --min-price 0
     python scripts/run_scraper.py --source barrett --max-pages 1 --min-price 0
+    python scripts/run_scraper.py --source broadarrow --max-pages 1 --min-price 0
 """
 
 import asyncio
@@ -79,6 +80,7 @@ AVAILABLE_SOURCES = [
     "cac",  # monthly — Car & Classic (carandclassic.com)
     "mecum",  # event — Mecum Auctions (mecum.com)
     "barrett",  # event — Barrett-Jackson (barrett-jackson.com)
+    "broadarrow",  # event — Broad Arrow Auctions (broadarrowauctions.com)
 ]
 
 
@@ -262,6 +264,17 @@ def main() -> None:
     elif args.source == "barrett":
         from scrapers.event.barrett_jackson.scraper import BarrettJacksonScraper
         scraper = BarrettJacksonScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
+    elif args.source == "broadarrow":
+        from scrapers.event.broad_arrow.scraper import BroadArrowScraper
+        scraper = BroadArrowScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
