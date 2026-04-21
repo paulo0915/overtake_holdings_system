@@ -3,9 +3,9 @@
 Scraper structure
 -----------------
 scrapers/
-  daily/     bat, cab, pcar, hag, dpl, sbm
-  monthly/   mbm (The MB Market), sbx (SBX Cars), cbk (Carbuckle), …
-  event/     (Traditional Auction Houses — manual by client)
+    daily/     bat, cab, pcar, hag, dpl, sbm
+    monthly/   mbm (The MB Market), sbx (SBX Cars), cbk (Carbuckle), …
+    event/     mecum (Mecum Auctions — Algolia + lot pages)
 
 Usage:
     python scripts/run_scraper.py --source bat
@@ -20,6 +20,7 @@ Usage:
     python scripts/run_scraper.py --source cc --max-pages 1 --min-price 0
     python scripts/run_scraper.py --source tmkt --max-pages 1 --min-price 0
     python scripts/run_scraper.py --source cac --max-pages 1 --min-price 0
+    python scripts/run_scraper.py --source mecum --max-pages 1 --min-price 0
 """
 
 import asyncio
@@ -75,6 +76,7 @@ AVAILABLE_SOURCES = [
     "cc",  # monthly — Collecting Cars
     "tmkt",  # monthly — The Market (themarket.co.uk)
     "cac",  # monthly — Car & Classic (carandclassic.com)
+    "mecum",  # event — Mecum Auctions (mecum.com)
 ]
 
 
@@ -236,6 +238,17 @@ def main() -> None:
     elif args.source == "cac":
         from scrapers.monthly.car_and_classic.scraper import CarAndClassicScraper
         scraper = CarAndClassicScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
+    elif args.source == "mecum":
+        from scrapers.event.mecum.scraper import MecumScraper
+        scraper = MecumScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
