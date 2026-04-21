@@ -19,6 +19,7 @@ Usage:
     python scripts/run_scraper.py --source cbk --max-pages 2 --min-price 10000
     python scripts/run_scraper.py --source cc --max-pages 1 --min-price 0
     python scripts/run_scraper.py --source tmkt --max-pages 1 --min-price 0
+    python scripts/run_scraper.py --source cac --max-pages 1 --min-price 0
 """
 
 import asyncio
@@ -73,6 +74,7 @@ AVAILABLE_SOURCES = [
     "cbk",  # monthly — Carbuckle
     "cc",  # monthly — Collecting Cars
     "tmkt",  # monthly — The Market (themarket.co.uk)
+    "cac",  # monthly — Car & Classic (carandclassic.com)
 ]
 
 
@@ -223,6 +225,17 @@ def main() -> None:
     elif args.source == "tmkt":
         from scrapers.monthly.the_market.scraper import TheMarketScraper
         scraper = TheMarketScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
+    elif args.source == "cac":
+        from scrapers.monthly.car_and_classic.scraper import CarAndClassicScraper
+        scraper = CarAndClassicScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
