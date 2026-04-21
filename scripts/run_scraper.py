@@ -21,6 +21,7 @@ Usage:
     python scripts/run_scraper.py --source tmkt --max-pages 1 --min-price 0
     python scripts/run_scraper.py --source cac --max-pages 1 --min-price 0
     python scripts/run_scraper.py --source mecum --max-pages 1 --min-price 0
+    python scripts/run_scraper.py --source barrett --max-pages 1 --min-price 0
 """
 
 import asyncio
@@ -77,6 +78,7 @@ AVAILABLE_SOURCES = [
     "tmkt",  # monthly — The Market (themarket.co.uk)
     "cac",  # monthly — Car & Classic (carandclassic.com)
     "mecum",  # event — Mecum Auctions (mecum.com)
+    "barrett",  # event — Barrett-Jackson (barrett-jackson.com)
 ]
 
 
@@ -249,6 +251,17 @@ def main() -> None:
     elif args.source == "mecum":
         from scrapers.event.mecum.scraper import MecumScraper
         scraper = MecumScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
+    elif args.source == "barrett":
+        from scrapers.event.barrett_jackson.scraper import BarrettJacksonScraper
+        scraper = BarrettJacksonScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
