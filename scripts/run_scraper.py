@@ -25,6 +25,8 @@ Usage:
     python scripts/run_scraper.py --source broadarrow --max-pages 1 --min-price 0
     # worldwide: --max-pages = max lots to export (0 = all on /inventory/); not "HTML pages"
     python scripts/run_scraper.py --source worldwide --max-pages 0 --min-price 0
+    # rms: --max-pages = max auctions to process across years 2026→2002 (0 = all history)
+    python scripts/run_scraper.py --source rms --max-pages 1 --min-price 0
 """
 
 import asyncio
@@ -84,6 +86,7 @@ AVAILABLE_SOURCES = [
     "barrett",  # event — Barrett-Jackson (barrett-jackson.com)
     "broadarrow",  # event — Broad Arrow Auctions (broadarrowauctions.com)
     "worldwide",  # event — Worldwide Auctioneers (listings.worldwideauctioneers.com)
+    "rms",  # event — RM Sotheby's (rmsothebys.com)
 ]
 
 
@@ -289,6 +292,17 @@ def main() -> None:
     elif args.source == "worldwide":
         from scrapers.event.worldwide_auctioneers.scraper import WorldwideAuctioneersScraper
         scraper = WorldwideAuctioneersScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
+    elif args.source == "rms":
+        from scrapers.event.rm_sothebys.scraper import RMSothebysScraper
+        scraper = RMSothebysScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
