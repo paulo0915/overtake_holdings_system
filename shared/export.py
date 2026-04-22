@@ -32,24 +32,27 @@ def export_to_excel(records: list[dict], output_path: str | Path, columns: list[
     return path
 
 
+def enrich_records(records: list[dict]) -> list[dict]:
+    """Populate derived ``Auction_status`` in place.
+
+    Idempotent — if a record_builder already set the field, it is preserved.
+    Called by ``export_to_csv``/``export_to_excel`` and by the DB-insert path,
+    so every record hits Supabase with this column populated.
+    """
+    for r in records:
+        if not r.get("Auction_status"):
+            r["Auction_status"] = "Completed" if r.get("Selling_price_USD") is not None else "Upcoming"
+    return records
+
+
 def _build_dataframe(records: list[dict], columns: list[str]) -> pd.DataFrame:
     """Build DataFrame with exact column ordering and type enforcement."""
+    enrich_records(records)
     df = pd.DataFrame(records)
 
     for col in columns:
         if col not in df.columns:
             df[col] = None
-
-    # Derive Auction_status if the record_builder didn't set it.
-    #   "Completed" = hammer settled (Selling_price_USD present)
-    #   "Upcoming"  = auction not yet concluded (no hammer yet)
-    if "Auction_status" in columns:
-        def _derive_status(row):
-            existing = row.get("Auction_status")
-            if existing:
-                return existing
-            return "Completed" if pd.notna(row.get("Selling_price_USD")) else "Upcoming"
-        df["Auction_status"] = df.apply(_derive_status, axis=1)
 
     df = df[columns]
 

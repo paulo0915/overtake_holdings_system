@@ -113,7 +113,10 @@ def main() -> None:
         "--mode", type=str, default="past", choices=["past", "upcoming"],
         help="For event-auction scrapers: 'past' (default) or 'upcoming' lots",
     )
-    parser.add_argument("--store-db", action="store_true", help="Write results to Supabase")
+    parser.add_argument(
+        "--no-store-db", action="store_true",
+        help="Skip writing results to Supabase (DB write is the default)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
 
     args = parser.parse_args()
@@ -348,11 +351,17 @@ def main() -> None:
         )
         records = asyncio.run(scraper.run())
 
-    # Store to Supabase if requested
-    if args.store_db and records:
+    # DB write is the default. Use --no-store-db to skip (e.g. for dry-run checks).
+    if records and not args.no_store_db:
         from shared.db import insert_auction_records
-        inserted = insert_auction_records(records)
-        print(f"Stored {inserted} records to Supabase")
+        try:
+            inserted = insert_auction_records(records)
+            print(f"Upserted {inserted} records to Supabase")
+        except Exception as e:
+            logging.getLogger(__name__).error("Supabase insert failed: %s", e)
+            print(f"Supabase insert FAILED: {e}")
+    elif args.no_store_db:
+        print("Skipped Supabase write (--no-store-db)")
 
     print(f"\nDone! {len(records)} records exported to {args.output_dir}/")
 

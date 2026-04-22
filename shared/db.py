@@ -28,18 +28,33 @@ AUCTION_BATCH_SIZE = 100
 
 
 def insert_auction_records(records: list[dict]) -> int:
-    """
-    Batch-insert auction records with dedup by Listing_url.
+    """Batch-upsert auction records into Supabase.
 
-    Uses upsert with on_conflict=Listing_url so the DB handles dedup
-    in a single call per batch instead of N+1 queries.
+    - Enriches each record with ``Auction_status``.
+    - Filters each record to only schema columns (drops any scraper-internal fields).
+    - Upserts on ``Listing_url`` with ``ignore_duplicates=False`` so re-scraping the
+      same URL **overwrites** the prior row. Crucial for the upcoming → past
+      lifecycle: a pre-event row (empty hammer, ``Upcoming``) gets replaced by the
+      post-event row (hammer price + ``Completed``) when the auction finishes.
 
-    Returns count of records sent (DB silently skips duplicates).
+    Returns count of records sent to the DB.
     """
+    from .export import enrich_records
+    from .schemas import AUCTION_COLUMNS
+
     client = get_client()
 
-    # Filter out records with no URL
-    valid = [r for r in records if r.get("Listing_url")]
+    # Populate derived fields + drop records with no URL.
+    # Supabase stores column names lowercased (Postgres unquoted identifier rule),
+    # while our Python schema is PascalCase — translate on the way out.
+    enrich_records(records)
+    allowed = set(AUCTION_COLUMNS)
+    valid: list[dict] = []
+    for r in records:
+        if not r.get("Listing_url"):
+            continue
+        valid.append({k.lower(): r.get(k) for k in allowed})
+
     if not valid:
         return 0
 
@@ -47,12 +62,12 @@ def insert_auction_records(records: list[dict]) -> int:
     for i in range(0, len(valid), AUCTION_BATCH_SIZE):
         batch = valid[i:i + AUCTION_BATCH_SIZE]
         client.table("auctions").upsert(
-            batch, on_conflict="Listing_url", ignore_duplicates=True,
+            batch, on_conflict="listing_url", ignore_duplicates=False,
         ).execute()
         inserted += len(batch)
-        logger.debug(f"Batch {i // AUCTION_BATCH_SIZE + 1}: sent {len(batch)} records")
+        logger.debug(f"Batch {i // AUCTION_BATCH_SIZE + 1}: upserted {len(batch)} records")
 
-    logger.info(f"Sent {inserted} auction records to Supabase (duplicates ignored by DB)")
+    logger.info(f"Upserted {inserted} auction records to Supabase")
     return inserted
 
 
