@@ -27,6 +27,8 @@ Usage:
     python scripts/run_scraper.py --source worldwide --max-pages 0 --min-price 0
     # rms: --max-pages = max auctions to process across years 2026→2002 (0 = all history)
     python scripts/run_scraper.py --source rms --max-pages 1 --min-price 0
+    # bon: --max-pages = max ended Bonhams Cars auctions (0 = all ~593 auctions)
+    python scripts/run_scraper.py --source bon --max-pages 1 --min-price 0
 """
 
 import asyncio
@@ -87,6 +89,7 @@ AVAILABLE_SOURCES = [
     "broadarrow",  # event — Broad Arrow Auctions (broadarrowauctions.com)
     "worldwide",  # event — Worldwide Auctioneers (listings.worldwideauctioneers.com)
     "rms",  # event — RM Sotheby's (rmsothebys.com)
+    "bon",  # event — Bonhams Cars (cars.bonhams.com)
 ]
 
 
@@ -303,6 +306,17 @@ def main() -> None:
     elif args.source == "rms":
         from scrapers.event.rm_sothebys.scraper import RMSothebysScraper
         scraper = RMSothebysScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
+    elif args.source == "bon":
+        from scrapers.event.bonhams.scraper import BonhamsScraper
+        scraper = BonhamsScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
