@@ -6,12 +6,41 @@ import random
 from typing import Callable
 
 import httpx
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from shared.config import REQUEST_DELAY_SECONDS, REQUEST_TIMEOUT, get_headers
 
 from .config import PCAR_API_BASE, PCAR_BASE_URL, PCAR_RESULTS_PER_PAGE
 
 logger = logging.getLogger(__name__)
+
+# Transient failures on one page used to silently truncate the scrape. Retry
+# 3× with exponential backoff before giving up on a page.
+_RETRY = dict(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=12),
+    retry=retry_if_exception_type(
+        (httpx.HTTPStatusError, httpx.TransportError, httpx.TimeoutException),
+    ),
+)
+
+
+@retry(**_RETRY)
+async def _fetch_list_page(
+    client: httpx.AsyncClient, *, page: int, limit: int,
+) -> dict:
+    resp = await client.get(
+        f"{PCAR_API_BASE}/results/",
+        params={
+            "status": "ended", "type": "cars",
+            "limit": limit, "page": page,
+            "sort_by": "price_high", "make": "all", "series": "all",
+        },
+        headers=get_headers(referer=f"{PCAR_BASE_URL}/results"),
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 class PCarAPIClient:
@@ -30,21 +59,17 @@ class PCarAPIClient:
         while True:
             logger.info(f"Fetching API page {page}...")
             try:
-                resp = await client.get(
-                    f"{PCAR_API_BASE}/results/",
-                    params={
-                        "status": "ended", "type": "cars",
-                        "limit": PCAR_RESULTS_PER_PAGE, "page": page,
-                        "sort_by": "price_high", "make": "all", "series": "all",
-                    },
-                    headers=get_headers(referer=f"{PCAR_BASE_URL}/results"),
-                    timeout=REQUEST_TIMEOUT,
+                data = await _fetch_list_page(
+                    client, page=page, limit=PCAR_RESULTS_PER_PAGE,
                 )
-                resp.raise_for_status()
-                data = resp.json()
             except Exception as e:
-                logger.warning(f"API error on page {page}: {e}")
-                break
+                # All retries exhausted — this is a real, persistent failure, not
+                # end-of-results. Log and abort rather than silently truncate.
+                logger.error(
+                    "PCarMarket list fetch failed on page %s after retries: %s",
+                    page, e,
+                )
+                raise
 
             results = data.get("results", [])
             if not results:

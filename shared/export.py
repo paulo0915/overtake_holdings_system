@@ -33,15 +33,37 @@ def export_to_excel(records: list[dict], output_path: str | Path, columns: list[
 
 
 def enrich_records(records: list[dict]) -> list[dict]:
-    """Populate derived ``Auction_status`` in place.
+    """Populate derived ``Auction_status`` and coerce ``Transmission`` in place.
 
     Idempotent — if a record_builder already set the field, it is preserved.
     Called by ``export_to_csv``/``export_to_excel`` and by the DB-insert path,
     so every record hits Supabase with this column populated.
+
+    ``Transmission`` is the canonical ``"Manual"`` / ``"Automatic"`` enum; anything
+    else (including the legacy lowercase values that used to come out of
+    ``normalize_transmission``) is re-normalized here as a safety net.
     """
+    from .normalizer import (
+        canonical_country_name,
+        normalize_engine_spec,
+        normalize_transmission,
+    )
+
     for r in records:
         if not r.get("Auction_status"):
             r["Auction_status"] = "Completed" if r.get("Selling_price_USD") is not None else "Upcoming"
+        tx = r.get("Transmission")
+        if tx not in (None, "Manual", "Automatic"):
+            r["Transmission"] = normalize_transmission(tx)
+        # Canonicalise ``Country`` so ``United Kingdom`` / ``UK`` /
+        # ``United States`` / ``USA`` don't co-exist in the same column.
+        if r.get("Country"):
+            r["Country"] = canonical_country_name(r["Country"])
+        # Run ``Engine_spec`` through the normalizer so junk values like
+        # ``"0"``, ``"V8"``, or bare displacement numbers (``"427"``) don't
+        # leak into the DB.
+        if r.get("Engine_spec"):
+            r["Engine_spec"] = normalize_engine_spec(r["Engine_spec"])
     return records
 
 
@@ -57,7 +79,7 @@ def _build_dataframe(records: list[dict], columns: list[str]) -> pd.DataFrame:
     df = df[columns]
 
     int_cols = [c for c in columns if c in (
-        "Year", "Mileage_mi", "Selling_price", "Bid_price", "Bid_count",
+        "Year", "Mileage_mi", "Selling_price",
         "Estimate_low", "Estimate_high", "Asking_price", "Previous_asking_price",
     )]
     for col in int_cols:
@@ -65,7 +87,7 @@ def _build_dataframe(records: list[dict], columns: list[str]) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
 
     float_cols = [c for c in columns if c in (
-        "Selling_price_USD", "Bid_price_USD", "Asking_price_USD", "FX_rate_used",
+        "Selling_price_USD", "Asking_price_USD", "FX_rate_used",
     )]
     for col in float_cols:
         if col in df.columns:
@@ -96,9 +118,6 @@ _COLUMN_DESCRIPTIONS = {
     "Currency": "Original listing currency.",
     "Selling_price": "Sale price in original currency. Sold only.",
     "Selling_price_USD": "Sale price converted to USD. Sold only.",
-    "Bid_price": "Highest bid in original currency. Unsold only.",
-    "Bid_price_USD": "Highest bid converted to USD. Unsold only.",
-    "Bid_count": "Number of bids placed.",
     "FX_rate_used": "Exchange rate used for USD conversion. 1.0 if already USD.",
     "Selling_date": "Date of sale/auction end (YYYY-MM-DD).",
     "Auction_house": "Name of auction house or platform.",

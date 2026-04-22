@@ -37,32 +37,27 @@ async def build_records(
 
         sold = bool(m.get("sold"))
         price = m.get("price")          # int USD or None
-        price_disclosed = bool(m.get("price_disclosed"))
         currency = (m.get("currency") or "USD").strip() or "USD"
 
-        # Sold status wording
-        if sold and price:
-            sold_status = "Sold"
-        elif sold and price_disclosed:
-            sold_status = "Sold"          # sold but price withheld
-        elif sold:
-            sold_status = "Sold"
-        else:
-            sold_status = "Unsold"
+        # Sold-only rows. Worldwide sometimes flags a lot as sold without
+        # disclosing the hammer — we drop those rather than persist a
+        # ``Sold`` row with no price (same policy as RM Sotheby's sealed sales).
+        if not sold:
+            skipped.setdefault("unsold", 0)
+            skipped["unsold"] += 1
+            continue
+        if price is None:
+            skipped.setdefault("sold_no_price", 0)
+            skipped["sold_no_price"] += 1
+            continue
 
-        selling_price = price if sold else None
-        bid_price = price if not sold and price else None
+        sold_status = "Sold"
+        selling_price = price
         selling_date = m.get("selling_date")
 
-        selling_price_usd = bid_price_usd = fx_rate = None
-        if selling_price is not None:
-            selling_price_usd, fx_rate = await fx_converter.convert_to_usd(
-                selling_price, currency, selling_date,
-            )
-        elif bid_price is not None:
-            bid_price_usd, fx_rate = await fx_converter.convert_to_usd(
-                bid_price, currency, selling_date,
-            )
+        selling_price_usd, fx_rate = await fx_converter.convert_to_usd(
+            selling_price, currency, selling_date,
+        )
 
         event = (m.get("auction_event") or "").strip()
 
@@ -75,6 +70,10 @@ async def build_records(
                 "Model": m.get("model"),
                 "VIN": m.get("vin"),
                 "Mileage_mi": m.get("mileage_mi"),
+                # Worldwide's /car-search/ POST returns a flat card payload with
+                # no structured colour / engine / transmission fields and no
+                # per-lot detail page. These columns are unavoidably null until
+                # the source exposes more data.
                 "Ext_color": None,
                 "Int_color": None,
                 "Engine_spec": None,
@@ -88,15 +87,12 @@ async def build_records(
                 "Currency": currency,
                 "Selling_price": selling_price,
                 "Selling_price_USD": selling_price_usd,
-                "Bid_price": bid_price,
-                "Bid_price_USD": bid_price_usd,
-                "Bid_count": None,
                 "FX_rate_used": fx_rate,
                 "Selling_date": selling_date,
                 "Auction_house": "Worldwide Auctioneers",
                 "Country": "USA",
                 "Image_url": m.get("image_url"),
-                "Listing_url": None,       # no per-lot URLs in POST response
+                "Listing_url": f"https://listings.worldwideauctioneers.com/inventory/#lot-{rid}",
                 "Source": "listings.worldwideauctioneers.com",
                 "Listing_description": event or None,
                 "Scraped_at": scraped_at,

@@ -47,13 +47,24 @@ def insert_auction_records(records: list[dict]) -> int:
     # Populate derived fields + drop records with no URL.
     # Supabase stores column names lowercased (Postgres unquoted identifier rule),
     # while our Python schema is PascalCase — translate on the way out.
+    # ``record_id`` is the DB's auto-generated UUID primary key (``gen_random_uuid()``);
+    # we must NOT send it so Postgres fills it in. The scraper's Python-side
+    # ``Record_ID`` value is dropped at insert time but kept in the CSV export.
     enrich_records(records)
-    allowed = set(AUCTION_COLUMNS)
+    allowed = set(AUCTION_COLUMNS) - {"Record_ID"}
     valid: list[dict] = []
+    dropped_no_url = 0
     for r in records:
         if not r.get("Listing_url"):
+            dropped_no_url += 1
             continue
         valid.append({k.lower(): r.get(k) for k in allowed})
+
+    if dropped_no_url:
+        logger.warning(
+            "Dropped %s record(s) with no Listing_url (cannot upsert without "
+            "the conflict key)", dropped_no_url,
+        )
 
     if not valid:
         return 0
@@ -75,16 +86,18 @@ def update_auction_post_event(lot_number: str, listing_url: str, updates: dict) 
     """
     Update an auction record after a traditional auction event.
 
-    Matches on Lot_number + Listing_url (pre-event row), updates
-    Selling_price, Sold_status, etc. in place.
+    Matches on ``lot_number`` + ``listing_url`` (Supabase stores unquoted
+    identifiers lowercased). Lowercases the ``updates`` dict keys so callers
+    can pass PascalCase (matching ``AUCTION_COLUMNS``) or lowercase freely.
     """
     client = get_client()
 
+    lowercased_updates = {k.lower(): v for k, v in (updates or {}).items()}
     result = (
         client.table("auctions")
-        .update(updates)
-        .eq("Lot_number", lot_number)
-        .eq("Listing_url", listing_url)
+        .update(lowercased_updates)
+        .eq("lot_number", lot_number)
+        .eq("listing_url", listing_url)
         .execute()
     )
 
@@ -97,6 +110,11 @@ def update_auction_post_event(lot_number: str, listing_url: str, updates: dict) 
 
 
 # ── Classifieds Database ────────────────────────────────────────
+
+def _lowercase_keys(d: dict) -> dict:
+    """Translate PascalCase Python-schema keys to lowercase Postgres columns."""
+    return {k.lower(): v for k, v in (d or {}).items()}
+
 
 def upsert_classified_record(record: dict) -> str:
     """
@@ -115,43 +133,48 @@ def upsert_classified_record(record: dict) -> str:
     if not url:
         return "skipped"
 
-    query = client.table("classifieds").select("*").eq("Listing_url", url)
+    query = client.table("classifieds").select("*").eq("listing_url", url)
     if vin:
-        query = query.eq("VIN", vin)
+        query = query.eq("vin", vin)
     if dealer:
-        query = query.eq("Dealer_name", dealer)
+        query = query.eq("dealer_name", dealer)
 
     existing = query.execute()
 
     if not existing.data:
         record["Listing_status"] = "Active"
-        client.table("classifieds").insert(record).execute()
+        client.table("classifieds").insert(_lowercase_keys(record)).execute()
         return "inserted"
 
     row = existing.data[0]
 
     # Price change detection — use `is not None` to handle zero prices correctly
-    old_price = row.get("Asking_price")
+    old_price = row.get("asking_price")
     new_price = record.get("Asking_price")
+
+    row_id = row.get("id") or row.get("record_id")
 
     if old_price is not None and new_price is not None and old_price != new_price:
         updates = {
-            "Previous_asking_price": old_price,
-            "Asking_price": new_price,
-            "Asking_price_USD": record.get("Asking_price_USD"),
-            "FX_rate_used": record.get("FX_rate_used"),
-            "Last_price_change_date": record.get("Last_seen_date"),
-            "Last_seen_date": record.get("Last_seen_date"),
-            "Scraped_at": record.get("Scraped_at"),
+            "previous_asking_price": old_price,
+            "asking_price": new_price,
+            "asking_price_usd": record.get("Asking_price_USD"),
+            "fx_rate_used": record.get("FX_rate_used"),
+            "last_price_change_date": record.get("Last_seen_date"),
+            "last_seen_date": record.get("Last_seen_date"),
+            "scraped_at": record.get("Scraped_at"),
         }
-        client.table("classifieds").update(updates).eq("Record_ID", row["Record_ID"]).execute()
+        # Match on whichever PK the classifieds table uses.
+        client.table("classifieds").update(updates).eq(
+            "id" if "id" in row else "record_id", row_id,
+        ).execute()
         return "updated"
 
     # Same price — just update Last_seen_date
     client.table("classifieds").update({
-        "Last_seen_date": record.get("Last_seen_date"),
-        "Scraped_at": record.get("Scraped_at"),
-    }).eq("Record_ID", row["Record_ID"]).execute()
+        "last_seen_date": record.get("Last_seen_date"),
+        "scraped_at": record.get("Scraped_at"),
+    }).eq("id" if "id" in row else "record_id", row_id).execute()
     return "skipped"
 
 
@@ -159,31 +182,30 @@ def mark_removed_classifieds(source: str, active_urls: set[str]) -> int:
     """
     Batch-mark classifieds as 'Removed' if Active but not in current scrape.
 
-    Fetches all active Record_IDs for the source, filters locally,
-    then issues a single batch update for removed ones.
+    Fetches all active IDs for the source, filters locally, then issues a
+    single batch update for removed ones.
     """
     client = get_client()
 
     active_rows = (
         client.table("classifieds")
-        .select("Record_ID, Listing_url")
-        .eq("Source", source)
-        .eq("Listing_status", "Active")
+        .select("id, listing_url")
+        .eq("source", source)
+        .eq("listing_status", "Active")
         .execute()
     )
 
     to_remove = [
-        row["Record_ID"] for row in active_rows.data
-        if row["Listing_url"] not in active_urls
+        row["id"] for row in active_rows.data
+        if row["listing_url"] not in active_urls
     ]
 
     if not to_remove:
         return 0
 
-    # Batch update using IN filter
     client.table("classifieds").update({
-        "Listing_status": "Removed",
-    }).in_("Record_ID", to_remove).execute()
+        "listing_status": "Removed",
+    }).in_("id", to_remove).execute()
 
     logger.info(f"Marked {len(to_remove)} classifieds as Removed for {source}")
     return len(to_remove)
@@ -195,10 +217,10 @@ def check_relisted(vin: str, dealer: str, new_url: str) -> bool:
 
     existing = (
         client.table("classifieds")
-        .select("Record_ID")
-        .eq("VIN", vin)
-        .eq("Dealer_name", dealer)
-        .neq("Listing_url", new_url)
+        .select("id")
+        .eq("vin", vin)
+        .eq("dealer_name", dealer)
+        .neq("listing_url", new_url)
         .execute()
     )
 

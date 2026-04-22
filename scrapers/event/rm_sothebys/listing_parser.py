@@ -229,7 +229,6 @@ def parse_value_fields(
     low_only = bool(_ESTIMATE_LOW_ONLY_RE.search(value_str))
 
     selling_price: int | None = None
-    bid_price: int | None = None
     estimate_low: int | None = None
     estimate_high: int | None = None
     currency: str | None = None
@@ -251,7 +250,6 @@ def parse_value_fields(
                 estimate_low = amounts_main[0][0]
                 currency = amounts_main[0][1]
             else:
-                bid_price = amounts_main[0][0]
                 currency = amounts_main[0][1]
         if estimate_low is None and amounts_pre:
             if len(amounts_pre) >= 2 and amounts_pre[0][1] == amounts_pre[1][1]:
@@ -280,7 +278,6 @@ def parse_value_fields(
         "sold": sold,
         "sold_status_label": status,
         "selling_price": selling_price,
-        "bid_price": bid_price,
         "estimate_low": estimate_low,
         "estimate_high": estimate_high,
         "estimate_currency": currency if has_estimate else None,

@@ -40,7 +40,6 @@ def parse(item: dict, detail: dict) -> dict:
         price = int(float(final_bid))
 
     selling_price = price if sold_status == "Sold" else None
-    bid_price = price if sold_status == "Unsold" else None
 
     end_date = item.get("end_date", "")
     selling_date = None
@@ -48,8 +47,6 @@ def parse(item: dict, detail: dict) -> dict:
         m = re.match(r"(\d{4}-\d{2}-\d{2})", end_date)
         if m:
             selling_date = m.group(1)
-
-    bid_count = item.get("bid_count")
     country = detail.get("country") or "USA"
     image_url = item.get("featured_image_large_url") or item.get("featured_image_url")
     currency = item.get("currency") or detail.get("currency") or "USD"
@@ -93,10 +90,8 @@ def parse(item: dict, detail: dict) -> dict:
         "int_color": int_color,
         "engine": engine,
         "transmission": transmission,
-        "bid_count": bid_count,
         "sold_status": sold_status,
         "selling_price": selling_price,
-        "bid_price": bid_price,
         "selling_date": selling_date,
         "currency": currency,
         "country": country,

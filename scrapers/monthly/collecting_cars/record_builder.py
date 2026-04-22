@@ -46,25 +46,13 @@ async def build_records(
             continue
 
         selling_price = amt if sold_status == "Sold" else None
-        bid_price = amt if sold_status == "Unsold" else None
 
-        selling_price_usd = bid_price_usd = fx_rate = None
+        selling_price_usd = fx_rate = None
         if selling_price is not None:
             selling_price_usd, fx_rate = await fx_converter.convert_to_usd(
                 selling_price, currency, selling_date,
             )
             if selling_price_usd is None and currency != "USD":
-                logger.warning(
-                    "FX conversion failed: %r (%s→USD, date=%s)",
-                    title[:50],
-                    currency,
-                    selling_date,
-                )
-        elif bid_price is not None:
-            bid_price_usd, fx_rate = await fx_converter.convert_to_usd(
-                bid_price, currency, selling_date,
-            )
-            if bid_price_usd is None and currency != "USD":
                 logger.warning(
                     "FX conversion failed: %r (%s→USD, date=%s)",
                     title[:50],
@@ -94,9 +82,6 @@ async def build_records(
                 "Currency": currency,
                 "Selling_price": selling_price,
                 "Selling_price_USD": selling_price_usd,
-                "Bid_price": bid_price,
-                "Bid_price_USD": bid_price_usd,
-                "Bid_count": s.get("bid_count"),
                 "FX_rate_used": fx_rate,
                 "Selling_date": selling_date,
                 "Auction_house": "Collecting Cars",

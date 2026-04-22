@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 import httpx
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from .config import APP_JS_HREF_RE, PAGE_DATA_PATH_TEMPLATE, SITE_ORIGIN
 
@@ -20,7 +21,17 @@ _COMMON_HEADERS = {"User-Agent": _UA, "Accept-Language": "en-US,en;q=0.9"}
 
 _APP_JS_RE = re.compile(APP_JS_HREF_RE)
 
+# Transient-failure retry policy.
+_RETRY = dict(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=12),
+    retry=retry_if_exception_type(
+        (httpx.HTTPStatusError, httpx.TransportError, httpx.TimeoutException),
+    ),
+)
 
+
+@retry(**_RETRY)
 async def fetch_home_html(client: httpx.AsyncClient) -> str:
     r = await client.get(SITE_ORIGIN + "/", headers=_COMMON_HEADERS)
     r.raise_for_status()
@@ -33,6 +44,7 @@ def find_app_js_path(home_html: str) -> str | None:
     return m.group(0) if m else None
 
 
+@retry(**_RETRY)
 async def fetch_app_js(client: httpx.AsyncClient, app_js_path: str) -> str:
     url = SITE_ORIGIN + app_js_path
     r = await client.get(url, headers={**_COMMON_HEADERS, "Referer": SITE_ORIGIN + "/"})
@@ -40,6 +52,7 @@ async def fetch_app_js(client: httpx.AsyncClient, app_js_path: str) -> str:
     return r.text
 
 
+@retry(**_RETRY)
 async def fetch_page_data(
     client: httpx.AsyncClient, *, path: str,
 ) -> dict[str, Any]:

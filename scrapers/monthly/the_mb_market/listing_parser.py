@@ -169,7 +169,6 @@ def parse_detail_html(html: str | None) -> dict[str, Any]:
     description = "\n\n".join(desc_parts)[:200_000] if desc_parts else None
 
     bid_m = re.search(r'id="bid_history_btn"[^>]*>(\d+)</a>', html, re.I)
-    bid_count = int(bid_m.group(1)) if bid_m else None
 
     end_m = re.search(
         r"ENDED\s+ON\s*</div>\s*<span>(\d{2}/\d{2}/\d{4})",
@@ -216,7 +215,6 @@ def parse_detail_html(html: str | None) -> dict[str, Any]:
         "location": location,
         "country": location_to_country(location),
         "listing_description": description,
-        "bid_count": bid_count,
         "selling_date": selling_date,
         "chassis": facts.get("chassis"),
     }

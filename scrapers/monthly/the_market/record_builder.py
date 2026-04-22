@@ -19,7 +19,7 @@ async def build_records(
     """``rows`` are merged list summaries + optional detail JSON."""
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
-    skipped = {"filter": 0, "dup": 0, "no_price": 0}
+    skipped = {"filter": 0, "dup": 0, "no_price": 0, "unsold": 0}
 
     for s in rows:
         rid = str(s.get("record_id") or "")
@@ -41,36 +41,22 @@ async def build_records(
         currency = s.get("currency") or "GBP"
         selling_date = s.get("selling_date")
 
-        if sold_status == "Withdrawn":
-            selling_price = bid_price = None
-        elif sold_status == "Sold":
-            selling_price = amt
-            bid_price = None
-        else:
-            selling_price = None
-            bid_price = amt
-
-        if sold_status in ("Sold", "Unsold") and amt is None:
+        # Sold-only persistence: Unsold / Withdrawn rows have no Selling_price
+        # and we no longer track bids, so they would land blank everywhere.
+        if sold_status != "Sold":
+            skipped["unsold"] += 1
+            continue
+        if amt is None:
             skipped["no_price"] += 1
             continue
+        selling_price = amt
 
-        selling_price_usd = bid_price_usd = fx_rate = None
+        selling_price_usd = fx_rate = None
         if selling_price is not None:
             selling_price_usd, fx_rate = await fx_converter.convert_to_usd(
                 selling_price, currency, selling_date,
             )
             if selling_price_usd is None and currency != "USD":
-                logger.warning(
-                    "FX conversion failed: %r (%s→USD, date=%s)",
-                    title[:50],
-                    currency,
-                    selling_date,
-                )
-        elif bid_price is not None:
-            bid_price_usd, fx_rate = await fx_converter.convert_to_usd(
-                bid_price, currency, selling_date,
-            )
-            if bid_price_usd is None and currency != "USD":
                 logger.warning(
                     "FX conversion failed: %r (%s→USD, date=%s)",
                     title[:50],
@@ -100,9 +86,6 @@ async def build_records(
                 "Currency": currency,
                 "Selling_price": selling_price,
                 "Selling_price_USD": selling_price_usd,
-                "Bid_price": bid_price,
-                "Bid_price_USD": bid_price_usd,
-                "Bid_count": s.get("bid_count"),
                 "FX_rate_used": fx_rate,
                 "Selling_date": selling_date,
                 "Auction_house": "The Market",

@@ -53,12 +53,11 @@ async def build_records(
 
         # FX conversion
         selling_price = parsed["selling_price"]
-        bid_price = parsed["bid_price"]
         currency = parsed["currency"]
         selling_date = parsed["selling_date"]
         title = parsed["title"]
 
-        selling_price_usd = bid_price_usd = fx_rate = None
+        selling_price_usd = fx_rate = None
 
         if selling_price is not None:
             selling_price_usd, fx_rate = await fx_converter.convert_to_usd(
@@ -69,14 +68,6 @@ async def build_records(
                     f"FX conversion failed: {title[:50]!r} ({currency}→USD, date={selling_date})"
                 )
 
-        elif bid_price is not None:
-            bid_price_usd, fx_rate = await fx_converter.convert_to_usd(
-                bid_price, currency, selling_date,
-            )
-            if bid_price_usd is None and currency != "USD":
-                logger.warning(
-                    f"FX conversion failed: {title[:50]!r} ({currency}→USD, date={selling_date})"
-                )
 
         records.append({
             "Record_ID": str(parsed["item_id"]),
@@ -99,9 +90,6 @@ async def build_records(
             "Currency": currency,
             "Selling_price": selling_price,
             "Selling_price_USD": selling_price_usd,
-            "Bid_price": bid_price,
-            "Bid_price_USD": bid_price_usd,
-            "Bid_count": parsed["bid_count"],
             "FX_rate_used": fx_rate,
             "Selling_date": selling_date,
             "Auction_house": "PCarMarket",

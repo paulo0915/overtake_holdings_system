@@ -66,11 +66,6 @@ async def build_records(
             has_been_sold = d.get("has_been_sold") if d.get("has_been_sold") is not None else s.get("has_been_sold")
             has_been_sold_after = s.get("has_been_sold_after", False)
             status = d.get("status") or s.get("status")
-            bid_count = (
-                d.get("successful_bid_count")
-                if d.get("successful_bid_count") is not None
-                else s.get("successful_bid_count")
-            )
             selling_date = d.get("selling_date")
         else:
             merged_title = title
@@ -86,7 +81,6 @@ async def build_records(
             has_been_sold = s.get("has_been_sold")
             has_been_sold_after = s.get("has_been_sold_after", False)
             status = s.get("status")
-            bid_count = s.get("successful_bid_count")
             selling_date = None
             if s.get("end_date_time") and isinstance(s["end_date_time"], str) and len(s["end_date_time"]) >= 10:
                 selling_date = s["end_date_time"][:10]
@@ -95,25 +89,16 @@ async def build_records(
         # ended without a live bid winning. Treat as Sold but flag is noted.
         sold_status = sold_status_from_flags(has_been_sold, has_been_sold_after, status)
         selling_price = high_bid_usd if sold_status == "Sold" else None
-        bid_price = high_bid_usd if sold_status == "Unsold" else None
 
         slug = s.get("slug") or ""
         listing_url = f"{HAGERTY_MARKETPLACE_BASE}/auction/{slug}/{aid}"
 
-        selling_price_usd = bid_price_usd = fx_rate = None
+        selling_price_usd = fx_rate = None
         if selling_price is not None:
             selling_price_usd, fx_rate = await fx_converter.convert_to_usd(
                 selling_price, currency, selling_date,
             )
             if selling_price_usd is None and currency != "USD":
-                logger.warning(
-                    f"FX conversion failed: {merged_title[:50]!r} ({currency}→USD, date={selling_date})"
-                )
-        elif bid_price is not None:
-            bid_price_usd, fx_rate = await fx_converter.convert_to_usd(
-                bid_price, currency, selling_date,
-            )
-            if bid_price_usd is None and currency != "USD":
                 logger.warning(
                     f"FX conversion failed: {merged_title[:50]!r} ({currency}→USD, date={selling_date})"
                 )
@@ -139,9 +124,6 @@ async def build_records(
             "Currency": currency,
             "Selling_price": selling_price,
             "Selling_price_USD": selling_price_usd,
-            "Bid_price": bid_price,
-            "Bid_price_USD": bid_price_usd,
-            "Bid_count": bid_count,
             "FX_rate_used": fx_rate,
             "Selling_date": selling_date,
             "Auction_house": "Hagerty Marketplace",

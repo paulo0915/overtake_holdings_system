@@ -448,7 +448,8 @@ def parse_lot_post(post: dict[str, Any]) -> dict[str, Any]:
 
     trans_sec = _tidy_section_body(sec.get("TRANSMISSION") or "", max_len=160)
     if not transmission and trans_sec:
-        transmission = normalize_transmission(trans_sec) or trans_sec
+        # Enum-only: leave NULL if the normalizer can't pick a canonical bucket.
+        transmission = normalize_transmission(trans_sec)
 
     mile_sec = sec.get("MILEAGE") or sec.get("ODOMETER")
     if mileage_mi is None:

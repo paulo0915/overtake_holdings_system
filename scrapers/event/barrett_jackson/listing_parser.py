@@ -179,8 +179,9 @@ def parse_docket_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
         vin = extract_vin_from_description(narrative)
     if not transmission:
         transmission = extract_transmission_from_description(narrative)
-    if not transmission and trans_raw:
-        transmission = trans_raw[:80]
+    # No raw-string fallback — the DB ``transmission`` column is a strict
+    # ``Manual`` / ``Automatic`` / ``NULL`` enum, so if the normalizer can't
+    # classify the source text we leave it blank rather than leak noise.
 
     return {
         "record_id": lot_id,

@@ -119,12 +119,17 @@ def _engine_from_highlights(bullets: list[str]) -> str | None:
 
 
 def _transmission_from_highlights(bullets: list[str]) -> str | None:
+    """Return ``Manual`` / ``Automatic`` / ``None`` — never a raw fallback."""
     for b in bullets:
         if _TRANS_RE.search(b) and not _ENGINE_RE.search(b):
-            return normalize_transmission(b) or b
+            nt = normalize_transmission(b)
+            if nt:
+                return nt
     for b in bullets:
         if _TRANS_RE.search(b):
-            return normalize_transmission(b) or b
+            nt = normalize_transmission(b)
+            if nt:
+                return nt
     return None
 
 

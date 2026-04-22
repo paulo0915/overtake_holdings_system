@@ -19,7 +19,7 @@ async def build_records(
     """``rows`` are merged summaries (AJAX card + detail page)."""
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
-    skipped = {"filter": 0, "dup": 0}
+    skipped = {"filter": 0, "dup": 0, "non_car": 0}
 
     for s in rows:
         rid = str(s.get("record_id") or "")
@@ -31,6 +31,12 @@ async def build_records(
         seen.add(rid)
 
         title = s.get("title") or ""
+        # Drop automobilia / parts / wheels — MBM mixes them into its results.
+        # Real car listings always start with a 4-digit model year. Parts titles
+        # read like ``Pair of 17" AMG Aero II Monoblock Wheels for W124``.
+        if not s.get("year"):
+            skipped["non_car"] += 1
+            continue
         if vehicle_filter and title:
             if not vehicle_filter.match(title, ""):
                 skipped["filter"] += 1
@@ -42,25 +48,13 @@ async def build_records(
         selling_date = s.get("selling_date")
 
         selling_price = amt if sold_status == "Sold" else None
-        bid_price = amt if sold_status == "Unsold" else None
 
-        selling_price_usd = bid_price_usd = fx_rate = None
+        selling_price_usd = fx_rate = None
         if selling_price is not None:
             selling_price_usd, fx_rate = await fx_converter.convert_to_usd(
                 selling_price, currency, selling_date,
             )
             if selling_price_usd is None and currency != "USD":
-                logger.warning(
-                    "FX conversion failed: %r (%s→USD, date=%s)",
-                    title[:50],
-                    currency,
-                    selling_date,
-                )
-        elif bid_price is not None:
-            bid_price_usd, fx_rate = await fx_converter.convert_to_usd(
-                bid_price, currency, selling_date,
-            )
-            if bid_price_usd is None and currency != "USD":
                 logger.warning(
                     "FX conversion failed: %r (%s→USD, date=%s)",
                     title[:50],
@@ -90,9 +84,6 @@ async def build_records(
                 "Currency": currency,
                 "Selling_price": selling_price,
                 "Selling_price_USD": selling_price_usd,
-                "Bid_price": bid_price,
-                "Bid_price_USD": bid_price_usd,
-                "Bid_count": s.get("bid_count"),
                 "FX_rate_used": fx_rate,
                 "Selling_date": selling_date,
                 "Auction_house": "The MB Market",

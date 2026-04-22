@@ -43,8 +43,9 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # curl_cffi requires the selector event loop on Windows (ProactorEventLoop lacks
-# add_reader which curl_cffi's async internals need).
-if sys.platform == "win32":
+# add_reader which curl_cffi's async internals need). But Playwright (used by C&B)
+# needs the Proactor loop to spawn subprocesses, so skip this for --source cab.
+if sys.platform == "win32" and "cab" not in sys.argv:
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # Ensure project root is on path
@@ -105,7 +106,16 @@ def main() -> None:
         help="Which source to scrape",
     )
     parser.add_argument("--min-price", type=int, default=None, help="Override MIN_PRICE_USD")
-    parser.add_argument("--max-pages", type=int, default=0, help="Max API pages (0=unlimited, for testing)")
+    parser.add_argument(
+        "--max-pages", type=int, default=0,
+        help=(
+            "Cap scrape size (0 = unlimited). Units vary per scraper:\n"
+            "  bat / cab / pcar / hag / dpl / sbm / mbm / cbk / cc / tmkt / "
+            "cac / mecum / barrett  → HTTP pages\n"
+            "  sbx / worldwide / gooding / broadarrow (upcoming mode)  → lot count\n"
+            "  rms / bon / broadarrow (past mode)  → auction count"
+        ),
+    )
     parser.add_argument("--max-concurrent", type=int, default=None, help="Override concurrency")
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
     parser.add_argument("--use-filter", action="store_true", help="Apply vehicle filter from tracking file")

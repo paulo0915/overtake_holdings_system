@@ -40,6 +40,94 @@ _VIN_LIKE_RE = re.compile(r"^[A-HJ-NPR-Z0-9]{17}$", re.I)
 _MILEAGE_KM_RE = re.compile(r"([\d,]+)\s*(?:kilometres|kilometers|km)\b", re.I)
 _MILEAGE_MI_RE = re.compile(r"([\d,]+)\s*(?:miles|mile|mi)\b", re.I)
 
+# Transmission mentions — Bonhams prose is inconsistent, so look for either a
+# compact bullet (``• Manual transmission``) or a hint in the running text.
+_TRANS_MANUAL_RE = re.compile(
+    r"\b(?:manual|stick[-\s]?shift|\d+[-\s]?speed\s+manual|H[-\s]?pattern)\b", re.I,
+)
+_TRANS_AUTO_RE = re.compile(
+    r"\b(?:automatic|PDK|DCT|Tiptronic|Sportmatic|Powerglide|Hydra[-\s]?Matic|DSG)\b", re.I,
+)
+
+# Engine mentions — capture a displacement + cylinder form (e.g. ``5.0-litre flat-12``,
+# ``3.6-Liter V8``). Keep it short; the full description is saved separately.
+_ENGINE_RE = re.compile(
+    r"\b(\d+(?:\.\d+)?)[-\s]?(?:liter|litre|l)\b[^.\n]{0,60}?"
+    r"\b(?:V\d{1,2}|flat[-\s]?\d{1,2}|straight[-\s]?\d|inline[-\s]?\d|boxer[-\s]?\d)\b",
+    re.I,
+)
+
+# Paint / exterior colour. Bonhams prose uses phrases like
+# ``Finished in Rosso Corsa over a Nero interior``. Require a colour-like
+# head-word (capitalised; not a common English connective) and cap length.
+_EXT_COLOR_RE = re.compile(
+    r"(?:finished|painted|repainted)\s+in\s+"
+    r"([A-Z][A-Za-z][A-Za-z\s'’-]{2,30}?)"
+    r"(?=\s+(?:paint|bodywork|over|with|and|,|\.|$))",
+    re.I,
+)
+
+# Interior colour — ``<colour> leather/upholstery/hide``. Limit the head-word
+# to short colour-like phrases (≤3 words) to avoid false positives like
+# ``Finished in factory Black with Tan``.
+_INT_COLOR_RE = re.compile(
+    r"\b([A-Z][a-z]+(?:\s+[a-z]+){0,2})\s+"
+    r"(?:leather|upholstery|hide|cloth|vinyl)\b",
+)
+
+
+def _extract_first_match(rx: re.Pattern[str], text: str) -> str | None:
+    if not text:
+        return None
+    m = rx.search(text)
+    if not m:
+        return None
+    s = (m.group(1) if m.groups() else m.group(0)).strip()
+    # Guard against over-greedy colour phrases like "Matching chassis".
+    banned = {"matching", "original", "its", "a", "the", "new", "racing", "competition"}
+    if s.split()[0].lower() in banned and len(s.split()) == 1:
+        return None
+    return s or None
+
+
+def extract_transmission(desc_text: str) -> str | None:
+    """``Manual`` / ``Automatic`` from free-text description."""
+    if not desc_text:
+        return None
+    if _TRANS_AUTO_RE.search(desc_text):
+        return "Automatic"
+    if _TRANS_MANUAL_RE.search(desc_text):
+        return "Manual"
+    return None
+
+
+def extract_engine_spec(desc_text: str) -> str | None:
+    """``5.0-litre flat-12`` style — tight capture, no prose."""
+    if not desc_text:
+        return None
+    m = _ENGINE_RE.search(desc_text)
+    if not m:
+        return None
+    return re.sub(r"\s+", " ", m.group(0)).strip().rstrip(",.")
+
+
+def extract_ext_color(desc_text: str) -> str | None:
+    return _extract_first_match(_EXT_COLOR_RE, desc_text or "")
+
+
+def extract_int_color(desc_text: str) -> str | None:
+    if not desc_text:
+        return None
+    m = _INT_COLOR_RE.search(desc_text)
+    if not m:
+        return None
+    s = m.group(1).strip()
+    # Reject common non-colour leaders.
+    banned = {"finished", "matching", "original", "its", "the", "new", "full"}
+    if s.split()[0].lower() in banned:
+        return None
+    return s
+
 
 def extract_next_data(html: str) -> dict[str, Any] | None:
     """Parse ``__NEXT_DATA__`` JSON from a Next.js-rendered Bonhams page."""
@@ -194,6 +282,13 @@ def parse_lot_detail_next_data(html: str) -> dict[str, Any] | None:
     year, make, model, clean_title = parse_title_for_year_make_model(sdesc)
     vin = extract_vin_from_title_or_desc(sdesc, desc_text)
     mileage_mi = parse_mileage_mi_from_desc(desc_text)
+    transmission = extract_transmission(desc_text)
+    engine_spec = extract_engine_spec(desc_text)
+    ext_color = extract_ext_color(desc_text)
+    # Interior-colour extraction from Bonhams prose was tried but produced too
+    # many false positives ("Italian", "Ambla", etc.). Left null until a more
+    # reliable signal appears in the source.
+    int_color = None
 
     images = lot.get("images") or []
     image_url = None
@@ -221,6 +316,10 @@ def parse_lot_detail_next_data(html: str) -> dict[str, Any] | None:
         "model": model,
         "vin": vin,
         "mileage_mi": mileage_mi,
+        "transmission": transmission,
+        "engine_spec": engine_spec,
+        "ext_color": ext_color,
+        "int_color": int_color,
         "description": desc_text or None,
         "status": status,
         "hammer_price": hammer_price,

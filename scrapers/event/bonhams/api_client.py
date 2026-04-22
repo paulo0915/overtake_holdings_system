@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 import httpx
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from .config import (
     AUCTIONS_PER_PAGE,
@@ -30,7 +31,17 @@ _COMMON_HTML_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+# Transient-failure retry policy.
+_RETRY = dict(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=12),
+    retry=retry_if_exception_type(
+        (httpx.HTTPStatusError, httpx.TransportError, httpx.TimeoutException),
+    ),
+)
 
+
+@retry(**_RETRY)
 async def post_auctions_search(
     client: httpx.AsyncClient, *, page: int, mode: str = "past",
 ) -> dict[str, Any]:
@@ -86,6 +97,7 @@ async def post_auctions_search(
     return r.json()
 
 
+@retry(**_RETRY)
 async def fetch_auction_lots_page_html(
     client: httpx.AsyncClient, *, auction_id: str, slug: str, page: int,
 ) -> str:
@@ -98,6 +110,7 @@ async def fetch_auction_lots_page_html(
     return r.text
 
 
+@retry(**_RETRY)
 async def fetch_lot_detail_html(
     client: httpx.AsyncClient, *, auction_id: str, lot_no: str, lot_slug: str,
 ) -> str:

@@ -5,9 +5,13 @@ import re
 from typing import Any
 
 from shared.fx_converter import FXConverter
+from shared.normalizer import canonical_country_name
 
 logger = logging.getLogger(__name__)
 
+# US-state tail inside a location string like ``Los Angeles, California`` means
+# the car is in the US — bypass the generic country-name override table since
+# the tail won't be a country.
 _US_STATE_RE = re.compile(
     r"\b(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|"
     r"Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|"
@@ -18,11 +22,6 @@ _US_STATE_RE = re.compile(
     re.I,
 )
 
-_COUNTRY_ALIASES = {
-    "usa": "USA", "us": "USA", "united states": "USA", "u.s.a.": "USA",
-    "uk": "UK", "u.k.": "UK", "united kingdom": "UK", "england": "UK", "scotland": "UK",
-}
-
 
 def _country_from_location(loc: str | None) -> str | None:
     if not loc:
@@ -30,9 +29,8 @@ def _country_from_location(loc: str | None) -> str | None:
     s = loc.strip()
     if _US_STATE_RE.search(s):
         return "USA"
-    tail = s.rsplit(",", 1)[-1].strip()
-    key = tail.lower()
-    return _COUNTRY_ALIASES.get(key, tail or None)
+    tail = s.rsplit(",", 1)[-1].strip() or None
+    return canonical_country_name(tail)
 
 
 async def build_records(
@@ -72,7 +70,6 @@ async def build_records(
 
         sold_status = (m.get("sold_status_label") or "Unsold").strip() or "Unsold"
         selling_price = m.get("selling_price")
-        bid_price = m.get("bid_price")
 
         # Sold-only: drop unsold and sold-but-undisclosed (sealed) listings.
         if sold_status != "Sold":
@@ -82,14 +79,10 @@ async def build_records(
             skipped["sold_no_price"] += 1
             continue
 
-        selling_price_usd = bid_price_usd = fx_rate = None
+        selling_price_usd = fx_rate = None
         if selling_price is not None:
             selling_price_usd, fx_rate = await fx_converter.convert_to_usd(
                 selling_price, currency, selling_date,
-            )
-        elif bid_price is not None:
-            bid_price_usd, fx_rate = await fx_converter.convert_to_usd(
-                bid_price, currency, selling_date,
             )
 
         records.append(
@@ -114,9 +107,6 @@ async def build_records(
                 "Currency": currency,
                 "Selling_price": selling_price,
                 "Selling_price_USD": selling_price_usd,
-                "Bid_price": bid_price,
-                "Bid_price_USD": bid_price_usd,
-                "Bid_count": None,
                 "FX_rate_used": fx_rate,
                 "Selling_date": selling_date,
                 "Auction_house": "RM Sotheby's",
@@ -159,9 +149,6 @@ def _build_upcoming_row(m, currency, selling_date, scraped_at):
         "Currency": currency,
         "Selling_price": None,
         "Selling_price_USD": None,
-        "Bid_price": None,
-        "Bid_price_USD": None,
-        "Bid_count": None,
         "FX_rate_used": None,
         "Selling_date": selling_date,
         "Auction_house": "RM Sotheby's",

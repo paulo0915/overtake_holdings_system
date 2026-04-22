@@ -28,8 +28,39 @@ CITY_COUNTRY_MAP = {
 }
 
 
+_COUNTRY_NAME_OVERRIDES = {
+    "united states": "USA",
+    "united states of america": "USA",
+    "u.s.a.": "USA",
+    "u.s.": "USA",
+    "us": "USA",
+    "usa": "USA",
+    "united kingdom": "UK",
+    "great britain": "UK",
+    "england": "UK",
+    "scotland": "UK",
+    "wales": "UK",
+    "northern ireland": "UK",
+    "u.k.": "UK",
+    "uk": "UK",
+    "united arab emirates": "UAE",
+    "u.a.e.": "UAE",
+    "uae": "UAE",
+}
+
+
+def canonical_country_name(name: str | None) -> str | None:
+    """Collapse synonyms (``United Kingdom`` ↔ ``UK``, ``United States`` ↔ ``USA``)."""
+    if not name:
+        return None
+    s = str(name).strip()
+    if not s:
+        return None
+    return _COUNTRY_NAME_OVERRIDES.get(s.lower(), s)
+
+
 def country_code_to_name(code: str | None) -> str | None:
-    """Convert ISO alpha-2 country code to display name via pycountry."""
+    """Convert ISO alpha-2 country code to canonical display name."""
     if not code:
         return None
     alpha2 = code.upper()
@@ -43,8 +74,9 @@ def country_code_to_name(code: str | None) -> str | None:
 
     country = pycountry.countries.get(alpha_2=alpha2)
     name = country.name if country else alpha2
-    _COUNTRY_CACHE[alpha2] = name
-    return name
+    canon = canonical_country_name(name) or name
+    _COUNTRY_CACHE[alpha2] = canon
+    return canon
 
 
 def city_to_country(city: str | None) -> str | None:
@@ -55,17 +87,31 @@ def city_to_country(city: str | None) -> str | None:
 
 
 def normalize_mileage(raw: str | None, unit: str | None) -> int | None:
-    """Convert raw mileage string to integer miles. Converts km to miles."""
+    """Convert raw mileage string to integer miles. Converts km to miles.
+
+    Handles ``15k`` (→ 15,000), ``15,000 Km`` (→ unit-converted), and bare
+    numbers. The ``k`` thousands-suffix is only applied when it appears
+    *immediately* after the digits with no following letter, to avoid
+    misreading the ``k`` in ``Km`` / ``km`` / ``kilometres`` as a multiplier.
+    """
     if raw is None:
         return None
 
     raw = raw.strip().lower()
-    match = re.search(r'([\d,]+\.?\d*)\s*(k)?', raw)
+    # ``(?!m)`` — don't consume ``k`` when the next char starts a unit word
+    # like ``km``, ``kilometre``, etc. (i.e. treat as unit, not a multiplier).
+    match = re.search(r"([\d,]+\.?\d*)\s*(k)?(?![a-z])", raw)
     if not match:
-        return None
-
-    num_str = match.group(1).replace(",", "")
-    has_k = match.group(2) is not None
+        # Retry without the thousands-suffix filter in case the only number
+        # in the string is followed by a unit word.
+        match = re.search(r"([\d,]+\.?\d*)", raw)
+        if not match:
+            return None
+        num_str = match.group(1).replace(",", "")
+        has_k = False
+    else:
+        num_str = match.group(1).replace(",", "")
+        has_k = match.group(2) is not None
 
     try:
         value = float(num_str)
@@ -74,6 +120,12 @@ def normalize_mileage(raw: str | None, unit: str | None) -> int | None:
 
     if has_k:
         value *= 1000
+    # Auto-detect unit from the raw text if the caller didn't supply one.
+    if unit is None:
+        if "mile" in raw or re.search(r"\bmi\b", raw):
+            unit = "mi"
+        elif "km" in raw or "kilomet" in raw:
+            unit = "km"
     if unit == "km":
         value *= KM_TO_MILES
 
@@ -81,12 +133,23 @@ def normalize_mileage(raw: str | None, unit: str | None) -> int | None:
 
 
 def normalize_engine_spec(raw: str | None) -> str | None:
-    """Normalize engine spec to consistent 'X.X-Liter' format."""
+    """Normalize engine spec to consistent 'X.X-Liter' format.
+
+    Rejects obvious junk values that some scrapers pass through from source
+    APIs: bare zero/empty, single-number cubic-inch codes (``427``, ``762``),
+    and bare cylinder-config tokens (``V8``, ``V-8``, ``LT6``). These are not
+    useful on their own — returning ``None`` keeps the column honest.
+    """
     if raw is None:
         return None
 
-    text = html_lib.unescape(raw).strip()
-    if not text:
+    text = html_lib.unescape(str(raw)).strip()
+    if not text or text == "0":
+        return None
+
+    # Reject "0 0", "0 / 0", etc. — Barrett-Jackson emits this when the
+    # source's engine field has two zero sub-fields.
+    if re.fullmatch(r"0[\s/.,-]+0", text):
         return None
 
     text = re.sub(r'(?<=\d)\s*L(?=\s)', '-Liter', text)
@@ -94,12 +157,30 @@ def normalize_engine_spec(raw: str | None) -> str | None:
     text = re.sub(r'(?i)[- ]liter\b', '-Liter', text)
     text = re.sub(r'(\d)\s+Liter', r'\1-Liter', text)
     text = text.replace("--", "-")
+    text = text.strip()
 
-    return text.strip()
+    # Bare cylinder-config token (``V8``, ``V-8``, ``LT6``, ``W07``) or a bare
+    # cubic-inch / displacement number without context is not a real spec.
+    if re.fullmatch(r"[VLW]-?\d{1,2}|LT\d+|W\d+", text, re.I):
+        return None
+    if re.fullmatch(r"\d{1,6}(?:\.\d+)?", text):
+        return None
+    # Bare hyphenated number range (``12-84``) — usually a year range that got
+    # mis-extracted, never a useful engine spec.
+    if re.fullmatch(r"\d{1,4}-\d{1,4}", text):
+        return None
+
+    return text
 
 
 def normalize_transmission(raw: str | None) -> str | None:
-    """Normalize transmission to 'manual' or 'automatic' only."""
+    """Normalize transmission to ``"Manual"`` or ``"Automatic"`` (or ``None``).
+
+    The DB stores one of exactly these two title-cased labels; anything else
+    (``"automatic (DSG)"``, ``"6-speed manual"``, etc.) collapses to one of
+    them. If the raw string matches neither bucket, return ``None`` rather
+    than forcing an invalid value.
+    """
     if raw is None:
         return None
 
@@ -115,16 +196,16 @@ def normalize_transmission(raw: str | None) -> str | None:
     manual_keywords = ["manual", "stick", "h-pattern"]
 
     if re.search(r'\d[- ]speed\s+manual', raw_lower):
-        return "manual"
+        return "Manual"
     if re.search(r'\d[- ]speed\s+(?:' + '|'.join(auto_keywords) + ')', raw_lower):
-        return "automatic"
+        return "Automatic"
 
     for kw in auto_keywords:
         if kw in raw_lower:
-            return "automatic"
+            return "Automatic"
     for kw in manual_keywords:
         if kw in raw_lower:
-            return "manual"
+            return "Manual"
 
     return None
 

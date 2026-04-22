@@ -36,19 +36,14 @@ async def build_records(
         hammer = m.get("hammer_usd")
         sold_status = (m.get("sold_status") or "Sold").strip() or "Sold"
         selling_price = hammer if sold_status == "Sold" else None
-        bid_price = hammer if sold_status != "Sold" else None
 
         selling_date = m.get("selling_date")
         currency = "USD"
 
-        selling_price_usd = bid_price_usd = fx_rate = None
+        selling_price_usd = fx_rate = None
         if selling_price is not None:
             selling_price_usd, fx_rate = await fx_converter.convert_to_usd(
                 selling_price, currency, selling_date,
-            )
-        elif bid_price is not None:
-            bid_price_usd, fx_rate = await fx_converter.convert_to_usd(
-                bid_price, currency, selling_date,
             )
 
         event = m.get("auction_event")
@@ -81,9 +76,6 @@ async def build_records(
                 "Currency": currency,
                 "Selling_price": selling_price,
                 "Selling_price_USD": selling_price_usd,
-                "Bid_price": bid_price,
-                "Bid_price_USD": bid_price_usd,
-                "Bid_count": None,
                 "FX_rate_used": fx_rate,
                 "Selling_date": selling_date,
                 "Auction_house": "Barrett-Jackson",

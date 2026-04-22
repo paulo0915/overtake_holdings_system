@@ -403,6 +403,23 @@ def merge_listing_partial(summary: dict[str, Any], partial: dict[str, Any] | Non
                     break
             if out.get("int_color"):
                 break
+    # Structured interior colour missing — fall back to description-text scan
+    # (``<colour> leather/upholstery/interior``). Description is only available
+    # later in the pipeline, so stash the raw text here for a second pass.
+    if not (out.get("int_color") or "").strip():
+        raw_body = _html_to_text(listing.get("description")) if listing else None
+        if raw_body:
+            m = re.search(
+                r"\b([A-Z][A-Za-z][A-Za-z\s'’-]{2,40}?)\s+"
+                r"(?:leather|upholstery|interior\s+trim|hide|cloth)\b",
+                raw_body, re.I,
+            )
+            if m:
+                candidate = m.group(1).strip()
+                # Reject noise leaders like ``matching``, ``original``.
+                first = candidate.split()[0].lower()
+                if first not in {"matching", "original", "its", "a", "the", "new"}:
+                    out["int_color"] = candidate
 
     vrm = _vehicle_vrm(vehicle)
     if vrm:

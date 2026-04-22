@@ -3,7 +3,7 @@
 import re
 import logging
 
-from shared.normalizer import normalize_engine_spec, unescape
+from shared.normalizer import normalize_engine_spec, normalize_mileage, unescape
 
 from .config import CAB_BASE_URL, STATUS_MAP, TRANSMISSION_MAP
 
@@ -57,7 +57,6 @@ def build_record(listing: dict, detail: dict, scraped_at: str) -> dict | None:
     sold_status = STATUS_MAP.get(status_raw, "Unsold")
 
     selling_price = listing.get("sale_amount") if sold_status == "Sold" else None
-    bid_price = listing.get("current_bid") if sold_status == "Unsold" else None
 
     auction_end = stats.get("auction_end") or listing.get("auction_end", "")
     selling_date = None
@@ -66,16 +65,20 @@ def build_record(listing: dict, detail: dict, scraped_at: str) -> dict | None:
         if m:
             selling_date = m.group(1)
 
-    bid_count = stats.get("bids")
-
     # C&B is USD-only; FX rate is always 1.0 when a price is present.
     currency = "USD"
     price_usd = selling_price
-    bid_price_usd = bid_price
-    fx_rate = 1.0 if (selling_price is not None or bid_price is not None) else None
+    fx_rate = 1.0 if selling_price is not None else None
 
     location = listing_data.get("location") or listing.get("location", "")
     country = location_to_country(location)
+
+    # C&B returns ``mileage`` as an integer in the seller's local unit. US
+    # listings are miles (no conversion); Canadian listings are km and need
+    # the shared km→mi factor. ``normalize_mileage`` takes a string + unit,
+    # so call it with the int stringified and an explicit unit code.
+    if mileage is not None and country == "Canada":
+        mileage = normalize_mileage(str(mileage), "km")
 
     photo = listing.get("main_photo") or {}
     image_url = None
@@ -117,9 +120,6 @@ def build_record(listing: dict, detail: dict, scraped_at: str) -> dict | None:
         "Currency": currency,
         "Selling_price": selling_price,
         "Selling_price_USD": price_usd,
-        "Bid_price": bid_price,
-        "Bid_price_USD": bid_price_usd,
-        "Bid_count": bid_count,
         "FX_rate_used": fx_rate,
         "Selling_date": selling_date,
         "Auction_house": "Cars & Bids",

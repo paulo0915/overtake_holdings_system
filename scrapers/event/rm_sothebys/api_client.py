@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 import httpx
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from .config import DEFAULT_PAGE_SIZE, SEARCH_LOTS_BODY_TEMPLATE, SEARCH_LOTS_PATH, SITE_ORIGIN
 
@@ -19,11 +20,21 @@ _DEFAULT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+# Transient-failure retry policy — matches Broad Arrow's pattern.
+_RETRY = dict(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=12),
+    retry=retry_if_exception_type(
+        (httpx.HTTPStatusError, httpx.TransportError, httpx.TimeoutException),
+    ),
+)
+
 
 def _lots_referer(auction_slug_lower: str) -> str:
     return f"{SITE_ORIGIN}/auctions/{auction_slug_lower}/lots/"
 
 
+@retry(**_RETRY)
 async def fetch_results_year_html(client: httpx.AsyncClient, year: int) -> str:
     url = f"{SITE_ORIGIN}/results/{year}"
     r = await client.get(url, headers={**_DEFAULT_HEADERS, "Referer": SITE_ORIGIN + "/"})
@@ -31,6 +42,7 @@ async def fetch_results_year_html(client: httpx.AsyncClient, year: int) -> str:
     return r.text
 
 
+@retry(**_RETRY)
 async def fetch_upcoming_html(client: httpx.AsyncClient) -> str:
     url = f"{SITE_ORIGIN}/upcoming/"
     r = await client.get(url, headers={**_DEFAULT_HEADERS, "Referer": SITE_ORIGIN + "/"})
@@ -38,6 +50,7 @@ async def fetch_upcoming_html(client: httpx.AsyncClient) -> str:
     return r.text
 
 
+@retry(**_RETRY)
 async def fetch_auction_lots_page_html(client: httpx.AsyncClient, slug: str) -> str:
     """GET ``/auctions/{slug}/lots/`` — landing page with title + date."""
     url = f"{SITE_ORIGIN}/auctions/{slug.lower()}/lots/"
@@ -46,6 +59,7 @@ async def fetch_auction_lots_page_html(client: httpx.AsyncClient, slug: str) -> 
     return r.text
 
 
+@retry(**_RETRY)
 async def post_search_lots(
     client: httpx.AsyncClient,
     *,
@@ -72,6 +86,7 @@ async def post_search_lots(
     return r.json()
 
 
+@retry(**_RETRY)
 async def fetch_lot_detail_html(client: httpx.AsyncClient, listing_path: str) -> str:
     """``listing_path`` starts with ``/auctions/...``."""
     url = f"{SITE_ORIGIN}{listing_path}" if listing_path.startswith("/") else f"{SITE_ORIGIN}/{listing_path}"

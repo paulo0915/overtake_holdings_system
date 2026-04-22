@@ -1,8 +1,14 @@
 -- Classifieds Database schema
 -- Based on Section 4 of DatabaseBrief_v1.0 + approved additions
+--
+-- ``record_id`` is a DB-generated UUID primary key (``gen_random_uuid()``) —
+-- scrapers never send it. Dedup is handled in application code using
+-- VIN + Dealer_name + Listing_url (see ``shared/db.py``).
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS classifieds (
-    Record_ID               TEXT PRIMARY KEY,
+    record_id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     Title                   TEXT NOT NULL,
     Year                    INTEGER,
     Make                    TEXT,

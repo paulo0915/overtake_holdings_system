@@ -19,10 +19,14 @@ from shared.normalizer import (
 logger = logging.getLogger(__name__)
 
 
-def parse_sold_text(sold_text: str | None) -> tuple[str, int | None, int | None, str | None]:
-    """Parse BaT sold_text. Returns (status, selling_price, bid_price, date_str)."""
+def parse_sold_text(sold_text: str | None) -> tuple[str, int | None, str | None]:
+    """Parse BaT sold_text. Returns ``(status, selling_price, date_str)``.
+
+    ``selling_price`` is only populated for ``Sold`` rows — we no longer persist
+    bid prices for unsold lots.
+    """
     if not sold_text:
-        return ("Withdrawn", None, None, None)
+        return ("Withdrawn", None, None)
 
     sold_text = sold_text.strip()
 
@@ -47,8 +51,7 @@ def parse_sold_text(sold_text: str | None) -> tuple[str, int | None, int | None,
         date_str = f"{year:04d}-{month:02d}-{day:02d}"
 
     selling_price = price if status == "Sold" else None
-    bid_price = price if status == "Unsold" else None
-    return (status, selling_price, bid_price, date_str)
+    return (status, selling_price, date_str)
 
 
 async def build_records(
@@ -96,7 +99,7 @@ async def build_records(
 
         # Sold text
         sold_text = item.get("sold_text", "")
-        sold_status, selling_price, bid_price, selling_date_str = parse_sold_text(sold_text)
+        sold_status, selling_price, selling_date_str = parse_sold_text(sold_text)
         selling_date = format_selling_date(item.get("timestamp_end"), selling_date_str)
 
         year = detail.get("year") or parse_year_from_title(title)
@@ -104,10 +107,10 @@ async def build_records(
         transmission = normalize_transmission(detail.get("transmission_raw"))
         engine = normalize_engine_spec(detail.get("engine_spec"))
 
-        # FX conversion
+        # FX conversion — only sold lots need a USD equivalent now that bid
+        # price / bid count are no longer persisted.
         currency = item.get("currency", "USD")
         price_usd, fx_rate = None, None
-        bid_price_usd = None
 
         if selling_price is not None:
             price_usd, fx_rate = await fx_converter.convert_to_usd(selling_price, currency, selling_date)
@@ -115,15 +118,6 @@ async def build_records(
                 logger.warning(
                     f"FX conversion failed: {title[:50]!r} ({currency}→USD, date={selling_date})"
                 )
-
-        if bid_price is not None:
-            bid_price_usd, bid_fx = await fx_converter.convert_to_usd(bid_price, currency, selling_date)
-            if bid_price_usd is None and currency != "USD":
-                logger.warning(
-                    f"FX conversion failed: {title[:50]!r} ({currency}→USD, date={selling_date})"
-                )
-            if fx_rate is None:
-                fx_rate = bid_fx
 
         country = country_code_to_name(item.get("country_code"))
         image_url = item.get("thumbnail_url")
@@ -153,9 +147,6 @@ async def build_records(
             "Currency": currency,
             "Selling_price": selling_price,
             "Selling_price_USD": price_usd,
-            "Bid_price": bid_price,
-            "Bid_price_USD": bid_price_usd,
-            "Bid_count": detail.get("bid_count"),
             "FX_rate_used": fx_rate,
             "Selling_date": selling_date,
             "Auction_house": "Bring a Trailer",

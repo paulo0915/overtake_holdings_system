@@ -6,8 +6,8 @@ CAB_RESULTS_PER_PAGE = 50
 
 # Transmission mapping: C&B uses integers
 TRANSMISSION_MAP = {
-    1: "automatic",
-    2: "manual",
+    1: "Automatic",
+    2: "Manual",
 }
 
 # Status mapping: C&B uses strings

@@ -7,7 +7,7 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
-from shared.normalizer import KM_TO_MILES, country_code_to_name
+from shared.normalizer import KM_TO_MILES, country_code_to_name, normalize_transmission
 
 from .config import LISTING_BASE
 
@@ -48,22 +48,17 @@ def _currency_iso(code: str | None) -> str:
 
 
 def _mileage_mi(raw: str | None) -> int | None:
-    """Collecting Cars shows ``Km`` in strings; avoid ``normalize_mileage``'s ``k`` suffix trap."""
+    """Collecting Cars strings like ``32,000 Km`` — delegate to the shared
+    normalizer (now unit-aware) and default to km when the unit is absent
+    since CC's catalogue is UK/EU-first.
+    """
     if not raw:
         return None
-    m = re.search(r"([\d,]+\.?\d*)", str(raw))
-    if not m:
-        return None
-    try:
-        val = float(m.group(1).replace(",", ""))
-    except ValueError:
-        return None
+    from shared.normalizer import normalize_mileage
+
     low = str(raw).lower()
-    if "mile" in low or re.search(r"\bmi\b", low):
-        return round(val)
-    if "km" in low or "kilomet" in low:
-        return round(val * KM_TO_MILES)
-    return round(val * KM_TO_MILES)
+    has_unit = "mile" in low or re.search(r"\bmi\b", low) or "km" in low or "kilomet" in low
+    return normalize_mileage(str(raw), unit=None if has_unit else "km")
 
 
 def _engine(powertrain: str | None, fuel: str | None) -> str | None:
@@ -109,7 +104,7 @@ def parse_typesense_document(doc: dict[str, Any]) -> dict[str, Any]:
         "ext_color": None,
         "int_color": None,
         "engine_spec": _engine(doc.get("powertrainName"), feats.get("fuelType")),
-        "transmission": feats.get("transmission"),
+        "transmission": normalize_transmission(feats.get("transmission")),
         "lot_number": record_id or None,
         "currency": _currency_iso(doc.get("currencyCode")),
         "amount_native": int(price) if price is not None else None,
@@ -201,7 +196,7 @@ def _parse_overview_list(soup: BeautifulSoup) -> dict[str, Any]:
             out["overview_mileage_raw"] = text
             out["mileage_mi"] = _mileage_mi(text)
         elif "icon-transmission" in src:
-            out["transmission"] = text
+            out["transmission"] = normalize_transmission(text)
         elif "icon-direction" in src:
             out["drive_side"] = text
         elif "icon-paint" in src:
@@ -230,16 +225,12 @@ def parse_detail_html(html: str | None) -> dict[str, Any]:
     if desc_el:
         description = _clean_description(desc_el.get_text(" ", strip=True))
 
-    bids = attrs.get("bids")
-    bid_count = int(bids) if bids and str(bids).isdigit() else None
-
     price_sold = attrs.get("pricesold") or attrs.get("saleprice")
     amount_native = int(price_sold) if price_sold and str(price_sold).isdigit() else None
 
     out: dict[str, Any] = {
         "auction_attrs": attrs,
         "listing_description": description or None,
-        "bid_count": bid_count,
         "amount_native": amount_native,
         "selling_date": _selling_date(attrs.get("date_sold")),
         "make": attrs.get("make"),
