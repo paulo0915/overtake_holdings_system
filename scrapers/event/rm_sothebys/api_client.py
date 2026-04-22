@@ -31,6 +31,21 @@ async def fetch_results_year_html(client: httpx.AsyncClient, year: int) -> str:
     return r.text
 
 
+async def fetch_upcoming_html(client: httpx.AsyncClient) -> str:
+    url = f"{SITE_ORIGIN}/upcoming/"
+    r = await client.get(url, headers={**_DEFAULT_HEADERS, "Referer": SITE_ORIGIN + "/"})
+    r.raise_for_status()
+    return r.text
+
+
+async def fetch_auction_lots_page_html(client: httpx.AsyncClient, slug: str) -> str:
+    """GET ``/auctions/{slug}/lots/`` — landing page with title + date."""
+    url = f"{SITE_ORIGIN}/auctions/{slug.lower()}/lots/"
+    r = await client.get(url, headers={**_DEFAULT_HEADERS, "Referer": SITE_ORIGIN + "/"})
+    r.raise_for_status()
+    return r.text
+
+
 async def post_search_lots(
     client: httpx.AsyncClient,
     *,

@@ -121,6 +121,38 @@ def parse_auctions_from_results_html(html: str) -> list[dict[str, Any]]:
     return out
 
 
+def parse_upcoming_slugs_from_html(html: str) -> list[str]:
+    """Unique lowercase slugs from ``/upcoming/`` — follows the ``VIEW ALL LOTS`` buttons."""
+    found: set[str] = set()
+    for m in _AUCTION_LOTS_REL_RE.finditer(html):
+        slug = (m.group(1) or "").lower()
+        if slug:
+            found.add(slug)
+    return sorted(found)
+
+
+def parse_auction_meta_from_lots_page(html: str) -> dict[str, Any]:
+    """From a ``/auctions/{slug}/lots/`` landing page — ``{name, date}``.
+
+    The ``<title>`` has shape ``The Monaco Auction 2026 | Available Lots | RM Sotheby's`` and
+    the page body contains ``25 April 2026`` style dates.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    name: str | None = None
+    og = soup.find("meta", attrs={"property": "og:title"}) or soup.find(
+        "meta", attrs={"name": "og:title"},
+    )
+    if og and og.get("content"):
+        name = og["content"].split("|")[0].strip() or None
+    if not name:
+        t = soup.find("title")
+        if t:
+            name = t.get_text(" ", strip=True).split("|")[0].strip() or None
+
+    date = _parse_auction_date(html_lib.unescape(html))
+    return {"name": name, "date": date}
+
+
 def is_vehicle_lot(item: dict[str, Any]) -> bool:
     """True for road-car rows (``referenceId`` ``r…``), excluding parts/memorabilia (``n…``)."""
     ref = str(item.get("referenceId") or "").strip()
@@ -178,6 +210,9 @@ def parse_year_make_model_from_title(title: str) -> tuple[int | None, str | None
     return year, None, None
 
 
+_ESTIMATE_LOW_ONLY_RE = re.compile(r"\b(?:in\s+excess\s+of|starting\s+at|from)\b", re.I)
+
+
 def parse_value_fields(
     value: str | None,
     value_type: str | None,
@@ -188,8 +223,10 @@ def parse_value_fields(
     vt = (value_type or "").strip()
     sold = bool(sold_flag) or (vt.lower() == "sold")
 
-    amounts_main = extract_money_amounts(value or "")
+    value_str = value or ""
+    amounts_main = extract_money_amounts(value_str)
     amounts_pre = extract_money_amounts(pre_sale_estimate or "")
+    low_only = bool(_ESTIMATE_LOW_ONLY_RE.search(value_str))
 
     selling_price: int | None = None
     bid_price: int | None = None
@@ -209,8 +246,13 @@ def parse_value_fields(
             estimate_low, estimate_high = amounts_main[0][0], amounts_main[1][0]
             currency = amounts_main[0][1]
         elif len(amounts_main) == 1:
-            bid_price = amounts_main[0][0]
-            currency = amounts_main[0][1]
+            # "Value In Excess Of €700,000 EUR" / "Starting at $…" → low-only estimate.
+            if low_only:
+                estimate_low = amounts_main[0][0]
+                currency = amounts_main[0][1]
+            else:
+                bid_price = amounts_main[0][0]
+                currency = amounts_main[0][1]
         if estimate_low is None and amounts_pre:
             if len(amounts_pre) >= 2 and amounts_pre[0][1] == amounts_pre[1][1]:
                 estimate_low, estimate_high = amounts_pre[0][0], amounts_pre[1][0]

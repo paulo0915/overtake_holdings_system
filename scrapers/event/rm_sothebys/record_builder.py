@@ -40,7 +40,10 @@ async def build_records(
     fx_converter: FXConverter,
     vehicle_filter,
     scraped_at: str,
+    *,
+    mode: str = "past",
 ) -> list[dict[str, Any]]:
+    """``mode='past'`` = sold-only; ``mode='upcoming'`` = all lots with ``Sold_status='Upcoming'``."""
     records: list[dict[str, Any]] = []
     skipped = {"filter": 0, "dup": 0, "unsold": 0, "sold_no_price": 0}
     seen: set[str] = set()
@@ -61,10 +64,15 @@ async def build_records(
                 continue
 
         currency = (m.get("currency") or "USD").strip() or "USD"
+        selling_date = m.get("auction_date")
+
+        if mode == "upcoming":
+            records.append(_build_upcoming_row(m, currency, selling_date, scraped_at))
+            continue
+
         sold_status = (m.get("sold_status_label") or "Unsold").strip() or "Unsold"
         selling_price = m.get("selling_price")
         bid_price = m.get("bid_price")
-        selling_date = m.get("auction_date")
 
         # Sold-only: drop unsold and sold-but-undisclosed (sealed) listings.
         if sold_status != "Sold":
@@ -124,3 +132,41 @@ async def build_records(
         if v:
             logger.info("Skipped %s (%s)", v, k)
     return records
+
+
+def _build_upcoming_row(m, currency, selling_date, scraped_at):
+    """Upcoming lots: no hammer/bid price; estimates are the forward-looking signal."""
+    has_est = m.get("estimate_low") is not None or m.get("estimate_high") is not None
+    return {
+        "Record_ID": str(m.get("record_id") or ""),
+        "Title": (m.get("title") or "").strip() or None,
+        "Year": m.get("year"),
+        "Make": m.get("make"),
+        "Model": m.get("model"),
+        "VIN": m.get("vin"),
+        "Mileage_mi": m.get("mileage_mi"),
+        "Ext_color": m.get("ext_color"),
+        "Int_color": m.get("int_color"),
+        "Engine_spec": m.get("engine_spec"),
+        "Transmission": m.get("transmission"),
+        "Lot_number": m.get("lot_number"),
+        "Estimate_low": m.get("estimate_low"),
+        "Estimate_high": m.get("estimate_high"),
+        "Estimate_currency": currency if has_est else None,
+        "Sold_status": None,
+        "Currency": currency,
+        "Selling_price": None,
+        "Selling_price_USD": None,
+        "Bid_price": None,
+        "Bid_price_USD": None,
+        "Bid_count": None,
+        "FX_rate_used": None,
+        "Selling_date": selling_date,
+        "Auction_house": "RM Sotheby's",
+        "Country": _country_from_location(m.get("location")),
+        "Image_url": m.get("image_url"),
+        "Listing_url": m.get("listing_url"),
+        "Source": "rmsothebys.com",
+        "Listing_description": m.get("description"),
+        "Scraped_at": scraped_at,
+    }
