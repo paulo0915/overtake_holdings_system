@@ -46,15 +46,35 @@ logger = logging.getLogger(__name__)
 
 
 class BonhamsScraper(BaseScraper):
-    """Past results from [Bonhams Cars](https://cars.bonhams.com)."""
+    """Past results or upcoming lots from [Bonhams Cars](https://cars.bonhams.com)."""
 
     SOURCE_NAME = "Bonhams"
     SOURCE_DOMAIN = "cars.bonhams.com"
     DATABASE = "auctions"
 
+    def __init__(
+        self,
+        min_price: int = 0,
+        output_dir="output",
+        max_concurrent: int = 4,
+        max_pages: int = 0,
+        vehicle_filter=None,
+        mode: str = "past",
+    ):
+        super().__init__(
+            min_price=min_price,
+            output_dir=output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        if mode not in {"past", "upcoming"}:
+            raise ValueError(f"mode must be 'past' or 'upcoming', got {mode!r}")
+        self.mode = mode
+
     async def run(self) -> list[dict]:
         logger.info("=" * 60)
-        logger.info("Bonhams - Starting")
+        logger.info("Bonhams - Starting (mode=%s)", self.mode)
         logger.info("Min price (USD): $%s", f"{self.min_price:,}")
         logger.info("Concurrency: %s", self.max_concurrent)
         logger.info("Vehicle filter: %s", "active" if self.vehicle_filter else "disabled")
@@ -76,7 +96,7 @@ class BonhamsScraper(BaseScraper):
             while True:
                 page += 1
                 try:
-                    payload = await post_auctions_search(client, page=page)
+                    payload = await post_auctions_search(client, page=page, mode=self.mode)
                 except Exception as e:
                     logger.warning("auctions-search page %s failed: %s", page, e)
                     break
@@ -84,7 +104,8 @@ class BonhamsScraper(BaseScraper):
                 hits, found = parse_auction_hits(payload)
                 if total_found is None:
                     total_found = found
-                    logger.info("Typesense reports %s ended auctions total", total_found)
+                    label = "upcoming" if self.mode == "upcoming" else "ended"
+                    logger.info("Typesense reports %s %s auctions total", total_found, label)
                 if not hits:
                     break
 
@@ -211,16 +232,20 @@ class BonhamsScraper(BaseScraper):
             fx = FXConverter(client)
             scraped_at = get_scraped_at()
             records = await record_builder.build_records(
-                merged_rows, fx, self.vehicle_filter, scraped_at,
+                merged_rows, fx, self.vehicle_filter, scraped_at, mode=self.mode,
             )
 
             before = len(records)
-            records = [r for r in records if self._row_meets_min_price(r)]
-            logger.info("After min-price ($%s): %s -> %s records",
-                        f"{self.min_price:,}", before, len(records))
+            if self.mode == "past":
+                records = [r for r in records if self._row_meets_min_price(r)]
+                logger.info("After min-price ($%s): %s -> %s records",
+                            f"{self.min_price:,}", before, len(records))
+            else:
+                logger.info("Upcoming mode — %s records (min-price filter skipped)", before)
 
-        csv_path = self.output_dir / "bonhams_auction_results.csv"
-        xlsx_path = self.output_dir / "bonhams_auction_results.xlsx"
+        suffix = "upcoming" if self.mode == "upcoming" else "auction_results"
+        csv_path = self.output_dir / f"bonhams_{suffix}.csv"
+        xlsx_path = self.output_dir / f"bonhams_{suffix}.xlsx"
         export_to_csv(records, csv_path, AUCTION_COLUMNS)
         export_to_excel(records, xlsx_path, AUCTION_COLUMNS)
 

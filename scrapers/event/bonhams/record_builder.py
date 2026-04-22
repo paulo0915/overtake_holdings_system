@@ -13,8 +13,10 @@ async def build_records(
     fx_converter: FXConverter,
     vehicle_filter,
     scraped_at: str,
+    *,
+    mode: str = "past",
 ) -> list[dict[str, Any]]:
-    """Sold-only: drop unsold and sold-but-price-undisclosed entries."""
+    """``mode='past'`` = sold-only with hammer price; ``mode='upcoming'`` = all car lots."""
     records: list[dict[str, Any]] = []
     skipped = {"filter": 0, "dup": 0, "unsold": 0, "sold_no_price": 0}
     seen: set[str] = set()
@@ -34,6 +36,46 @@ async def build_records(
                 skipped["filter"] += 1
                 continue
 
+        currency = (m.get("currency") or "USD").strip().upper() or "USD"
+        selling_date = _date_only(m.get("hammer_time"))
+        has_est = m.get("estimate_low") is not None or m.get("estimate_high") is not None
+
+        if mode == "upcoming":
+            records.append({
+                "Record_ID": rid,
+                "Title": m.get("title") or None,
+                "Year": m.get("year"),
+                "Make": m.get("make"),
+                "Model": m.get("model"),
+                "VIN": m.get("vin"),
+                "Mileage_mi": m.get("mileage_mi"),
+                "Ext_color": None,
+                "Int_color": None,
+                "Engine_spec": None,
+                "Transmission": None,
+                "Lot_number": m.get("lot_no"),
+                "Estimate_low": m.get("estimate_low"),
+                "Estimate_high": m.get("estimate_high"),
+                "Estimate_currency": currency if has_est else None,
+                "Sold_status": None,
+                "Currency": currency,
+                "Selling_price": None,
+                "Selling_price_USD": None,
+                "Bid_price": None,
+                "Bid_price_USD": None,
+                "Bid_count": None,
+                "FX_rate_used": None,
+                "Selling_date": selling_date,
+                "Auction_house": "Bonhams",
+                "Country": m.get("country"),
+                "Image_url": m.get("image_url"),
+                "Listing_url": m.get("listing_url"),
+                "Source": "cars.bonhams.com",
+                "Listing_description": m.get("description"),
+                "Scraped_at": scraped_at,
+            })
+            continue
+
         status = (m.get("status") or "").upper()
         hammer_price = m.get("hammer_price")
         # Sold + price required.
@@ -43,9 +85,6 @@ async def build_records(
         if hammer_price is None or hammer_price == 0:
             skipped["sold_no_price"] += 1
             continue
-
-        currency = (m.get("currency") or "USD").strip().upper() or "USD"
-        selling_date = _date_only(m.get("hammer_time"))
 
         selling_price_usd, fx_rate = await fx_converter.convert_to_usd(
             hammer_price, currency, selling_date,
@@ -67,7 +106,7 @@ async def build_records(
                 "Lot_number": m.get("lot_no"),
                 "Estimate_low": m.get("estimate_low"),
                 "Estimate_high": m.get("estimate_high"),
-                "Estimate_currency": currency if (m.get("estimate_low") or m.get("estimate_high")) else None,
+                "Estimate_currency": currency if has_est else None,
                 "Sold_status": "Sold",
                 "Currency": currency,
                 "Selling_price": hammer_price,

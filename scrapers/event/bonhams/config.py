@@ -18,3 +18,10 @@ AUCTIONS_SEARCH_FILTER = (
     "&& (auctionType:=[`ONLINE`, `PUBLIC`])"
 )
 AUCTIONS_SORT_BY = "hammerTime.timestamp:desc,auctionTitle:desc"
+
+# Upcoming auctions filter: ``NS`` (Not Started) or ``IP`` (In Progress / live).
+# ``auctionType`` includes ``OTHER`` too (some private/consignment sales use it).
+UPCOMING_AUCTIONS_FILTER = (
+    "(biddingStatus:=[`NS`, `IP`]) && (brand:=[`bonhams-cars`])"
+)
+UPCOMING_AUCTIONS_SORT_BY = "hammerTime.timestamp:asc,auctionTitle:asc"

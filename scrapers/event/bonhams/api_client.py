@@ -15,6 +15,8 @@ from .config import (
     TYPESENSE_API_KEY,
     TYPESENSE_HOST,
     TYPESENSE_SEARCH_PATH,
+    UPCOMING_AUCTIONS_FILTER,
+    UPCOMING_AUCTIONS_SORT_BY,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,17 +31,37 @@ _COMMON_HTML_HEADERS = {
 }
 
 
-async def post_auctions_search(client: httpx.AsyncClient, *, page: int) -> dict[str, Any]:
-    """Return the Typesense response for one page of ended Bonhams Cars auctions."""
+async def post_auctions_search(
+    client: httpx.AsyncClient, *, page: int, mode: str = "past",
+) -> dict[str, Any]:
+    """Typesense response for one page of Bonhams Cars auctions.
+
+    ``mode='past'``     → ``biddingStatus:=EN`` (ended), sorted newest first.
+    ``mode='upcoming'`` → ``biddingStatus:=[NS,IP]`` (not-started / in-progress)
+                          with hammerTime in the future (excludes stale orphan
+                          records from years ago that still carry ``NS`` status),
+                          sorted by upcoming hammer date ascending.
+    """
+    if mode == "upcoming":
+        import time
+
+        # 7-day backoff so in-progress (``IP``) auctions whose hammer window has
+        # just started are still included.
+        ts_floor = int(time.time()) - 7 * 24 * 3600
+        filter_by = f"{UPCOMING_AUCTIONS_FILTER} && (hammerTime.timestamp:>{ts_floor})"
+        sort_by = UPCOMING_AUCTIONS_SORT_BY
+    else:
+        filter_by = AUCTIONS_SEARCH_FILTER
+        sort_by = AUCTIONS_SORT_BY
     body = {
         "searches": [
             {
                 "collection": "auctions-search",
                 "exclude_fields": "description",
-                "filter_by": AUCTIONS_SEARCH_FILTER,
+                "filter_by": filter_by,
                 "facet_by": "auctionType",
                 "query_by": "auctionHeading,auctionTitle,departments.name",
-                "sort_by": AUCTIONS_SORT_BY,
+                "sort_by": sort_by,
                 "page": page,
                 "per_page": AUCTIONS_PER_PAGE,
                 "max_facet_values": 10,
