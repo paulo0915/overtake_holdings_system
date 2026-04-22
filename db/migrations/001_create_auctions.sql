@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS auctions (
     Estimate_high   INTEGER,
     Estimate_currency TEXT,
     Sold_status     TEXT,
+    Auction_status  TEXT,
     Currency        TEXT,
     Selling_price   INTEGER,
     Selling_price_USD REAL,
@@ -40,6 +41,7 @@ CREATE INDEX IF NOT EXISTS idx_auctions_source ON auctions(Source);
 CREATE INDEX IF NOT EXISTS idx_auctions_make ON auctions(Make);
 CREATE INDEX IF NOT EXISTS idx_auctions_year ON auctions(Year);
 CREATE INDEX IF NOT EXISTS idx_auctions_sold_status ON auctions(Sold_status);
+CREATE INDEX IF NOT EXISTS idx_auctions_auction_status ON auctions(Auction_status);
 CREATE INDEX IF NOT EXISTS idx_auctions_selling_date ON auctions(Selling_date);
 CREATE INDEX IF NOT EXISTS idx_auctions_listing_url ON auctions(Listing_url);
 CREATE INDEX IF NOT EXISTS idx_auctions_lot_source ON auctions(Lot_number, Listing_url);

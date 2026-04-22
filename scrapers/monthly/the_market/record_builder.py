@@ -96,6 +96,7 @@ async def build_records(
                 "Estimate_high": s.get("estimate_high"),
                 "Estimate_currency": s.get("estimate_currency"),
                 "Sold_status": sold_status,
+                "Auction_status": "Completed",
                 "Currency": currency,
                 "Selling_price": selling_price,
                 "Selling_price_USD": selling_price_usd,

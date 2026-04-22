@@ -18,6 +18,7 @@ AUCTION_COLUMNS = [
     "Estimate_high",
     "Estimate_currency",
     "Sold_status",
+    "Auction_status",
     "Currency",
     "Selling_price",
     "Selling_price_USD",

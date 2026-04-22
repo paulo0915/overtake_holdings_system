@@ -40,6 +40,17 @@ def _build_dataframe(records: list[dict], columns: list[str]) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = None
 
+    # Derive Auction_status if the record_builder didn't set it.
+    #   "Completed" = hammer settled (Selling_price_USD present)
+    #   "Upcoming"  = auction not yet concluded (no hammer yet)
+    if "Auction_status" in columns:
+        def _derive_status(row):
+            existing = row.get("Auction_status")
+            if existing:
+                return existing
+            return "Completed" if pd.notna(row.get("Selling_price_USD")) else "Upcoming"
+        df["Auction_status"] = df.apply(_derive_status, axis=1)
+
     df = df[columns]
 
     int_cols = [c for c in columns if c in (
@@ -78,6 +89,7 @@ _COLUMN_DESCRIPTIONS = {
     "Estimate_high": "High pre-sale estimate (traditional auctions).",
     "Estimate_currency": "Currency of estimate.",
     "Sold_status": "'Sold', 'Unsold', or 'Withdrawn'.",
+    "Auction_status": "'Completed' (hammer settled) or 'Upcoming' (not yet concluded).",
     "Currency": "Original listing currency.",
     "Selling_price": "Sale price in original currency. Sold only.",
     "Selling_price_USD": "Sale price converted to USD. Sold only.",

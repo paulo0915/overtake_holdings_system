@@ -108,6 +108,7 @@ async def build_records(
             "Estimate_high": est_hi,
             "Estimate_currency": est_cur,
             "Sold_status": sold_status,
+            "Auction_status": "Completed",
             "Currency": currency,
             "Selling_price": selling_price,
             "Selling_price_USD": selling_price_usd,

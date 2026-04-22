@@ -80,6 +80,7 @@ async def build_records(
                 "Estimate_high": m.get("estimate_high"),
                 "Estimate_currency": currency if has_est else None,
                 "Sold_status": "Sold",
+                "Auction_status": "Completed",
                 "Currency": currency,
                 "Selling_price": sale_price,
                 "Selling_price_USD": selling_price_usd,
