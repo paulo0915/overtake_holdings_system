@@ -23,6 +23,8 @@ Usage:
     python scripts/run_scraper.py --source mecum --max-pages 1 --min-price 0
     python scripts/run_scraper.py --source barrett --max-pages 1 --min-price 0
     python scripts/run_scraper.py --source broadarrow --max-pages 1 --min-price 0
+    # worldwide: --max-pages = max lots to export (0 = all on /inventory/); not "HTML pages"
+    python scripts/run_scraper.py --source worldwide --max-pages 0 --min-price 0
 """
 
 import asyncio
@@ -81,6 +83,7 @@ AVAILABLE_SOURCES = [
     "mecum",  # event — Mecum Auctions (mecum.com)
     "barrett",  # event — Barrett-Jackson (barrett-jackson.com)
     "broadarrow",  # event — Broad Arrow Auctions (broadarrowauctions.com)
+    "worldwide",  # event — Worldwide Auctioneers (listings.worldwideauctioneers.com)
 ]
 
 
@@ -275,6 +278,17 @@ def main() -> None:
     elif args.source == "broadarrow":
         from scrapers.event.broad_arrow.scraper import BroadArrowScraper
         scraper = BroadArrowScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
+    elif args.source == "worldwide":
+        from scrapers.event.worldwide_auctioneers.scraper import WorldwideAuctioneersScraper
+        scraper = WorldwideAuctioneersScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
