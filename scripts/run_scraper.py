@@ -298,6 +298,7 @@ def main() -> None:
             max_concurrent=max_concurrent,
             max_pages=args.max_pages,
             vehicle_filter=vehicle_filter,
+            mode=args.mode,
         )
         records = asyncio.run(scraper.run())
 

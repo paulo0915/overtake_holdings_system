@@ -21,3 +21,10 @@ EVENTS_BASE_PATH = "/events/event"
 RESULTS_PATH = "/vehicles/results"
 SORT_PARAM = "q[s][0][name_dir]"
 SORT_VALUE = "sales_price.desc"
+
+# Upcoming-auctions listing: ``/vehicles`` with ``branch_id_in[]`` for every active
+# upcoming branch. The browser filter populates this list dynamically — we fetch
+# the calendar/home page and pull branch IDs from it, then build the URL.
+UPCOMING_LISTING_PATH = "/vehicles"
+UPCOMING_SORT_PARAM = "q[s][0][name_dir]"
+UPCOMING_SORT_VALUE = "stock.asc"

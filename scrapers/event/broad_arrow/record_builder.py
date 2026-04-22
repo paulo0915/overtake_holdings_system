@@ -13,7 +13,10 @@ async def build_records(
     fx_converter: FXConverter,
     vehicle_filter,
     scraped_at: str,
+    *,
+    mode: str = "past",
 ) -> list[dict[str, Any]]:
+    """``mode='past'`` = hammer-based rows; ``mode='upcoming'`` = estimate-based rows."""
     records: list[dict[str, Any]] = []
     skipped = {"filter": 0, "dup": 0}
     seen: set[str] = set()
@@ -33,13 +36,17 @@ async def build_records(
                 skipped["filter"] += 1
                 continue
 
-        hammer = m.get("hammer")
         currency = (m.get("currency") or "USD").strip() or "USD"
+        selling_date = m.get("selling_date")
+
+        if mode == "upcoming":
+            records.append(_build_upcoming_row(m, currency, selling_date, scraped_at))
+            continue
+
+        hammer = m.get("hammer")
         sold_status = (m.get("sold_status") or "Unsold").strip() or "Unsold"
         selling_price = hammer if sold_status == "Sold" and hammer is not None else None
         bid_price = hammer if sold_status != "Sold" and hammer is not None else None
-
-        selling_date = m.get("selling_date")
 
         selling_price_usd = bid_price_usd = fx_rate = None
         if selling_price is not None:
@@ -65,9 +72,9 @@ async def build_records(
                 "Engine_spec": m.get("engine_spec"),
                 "Transmission": m.get("transmission"),
                 "Lot_number": m.get("lot_number"),
-                "Estimate_low": None,
-                "Estimate_high": None,
-                "Estimate_currency": None,
+                "Estimate_low": m.get("estimate_low"),
+                "Estimate_high": m.get("estimate_high"),
+                "Estimate_currency": currency if (m.get("estimate_low") or m.get("estimate_high")) else None,
                 "Sold_status": sold_status,
                 "Currency": currency,
                 "Selling_price": selling_price,
@@ -82,7 +89,7 @@ async def build_records(
                 "Image_url": m.get("image_url"),
                 "Listing_url": m.get("listing_url"),
                 "Source": "broadarrowauctions.com",
-                "Listing_description": None,
+                "Listing_description": m.get("listing_description"),
                 "Scraped_at": scraped_at,
             },
         )
@@ -91,3 +98,41 @@ async def build_records(
         if v:
             logger.info("Skipped %s (%s)", v, k)
     return records
+
+
+def _build_upcoming_row(m, currency, selling_date, scraped_at):
+    """Upcoming: empty Sold_status, no hammer/bid, estimate range is the signal."""
+    has_est = m.get("estimate_low") is not None or m.get("estimate_high") is not None
+    return {
+        "Record_ID": str(m.get("record_id") or ""),
+        "Title": (m.get("title") or "").strip() or None,
+        "Year": m.get("year"),
+        "Make": m.get("make"),
+        "Model": m.get("model"),
+        "VIN": m.get("vin"),
+        "Mileage_mi": m.get("mileage_mi"),
+        "Ext_color": m.get("ext_color"),
+        "Int_color": m.get("int_color"),
+        "Engine_spec": m.get("engine_spec"),
+        "Transmission": m.get("transmission"),
+        "Lot_number": m.get("lot_number"),
+        "Estimate_low": m.get("estimate_low"),
+        "Estimate_high": m.get("estimate_high"),
+        "Estimate_currency": currency if has_est else None,
+        "Sold_status": m.get("sold_status"),
+        "Currency": currency,
+        "Selling_price": None,
+        "Selling_price_USD": None,
+        "Bid_price": None,
+        "Bid_price_USD": None,
+        "Bid_count": None,
+        "FX_rate_used": None,
+        "Selling_date": selling_date,
+        "Auction_house": "Broad Arrow",
+        "Country": "USA",
+        "Image_url": m.get("image_url"),
+        "Listing_url": m.get("listing_url"),
+        "Source": "broadarrowauctions.com",
+        "Listing_description": m.get("listing_description"),
+        "Scraped_at": scraped_at,
+    }

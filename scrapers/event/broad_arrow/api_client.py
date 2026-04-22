@@ -82,6 +82,26 @@ async def fetch_branch_results_html(
     return resp.text
 
 
+@retry(**_RETRY)
+async def fetch_upcoming_vehicles_html(
+    client: httpx.AsyncClient, *, page: int = 1,
+) -> str:
+    """GET ``/vehicles?page=N`` — default listing shows only upcoming auctions."""
+    from .config import UPCOMING_LISTING_PATH
+
+    url = f"{SITE_ORIGIN}{UPCOMING_LISTING_PATH}"
+    if page > 1:
+        url = f"{url}?page={page}"
+    resp = await client.get(
+        url,
+        headers=get_headers(accept="text/html", referer=SITE_ORIGIN + "/"),
+        timeout=REQUEST_TIMEOUT,
+        follow_redirects=True,
+    )
+    resp.raise_for_status()
+    return resp.text
+
+
 async def fetch_vehicle_html(
     client: httpx.AsyncClient, *, vehicle_path: str, referer: str = ""
 ) -> str | None:

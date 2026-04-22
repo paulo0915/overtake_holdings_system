@@ -42,6 +42,35 @@ _CONVERT_PRICE_RE = re.compile(
     r'<span[^>]*id=[\'"]convert_price[\'"][^>]*>\s*(\$[\d,]+)',
     re.IGNORECASE,
 )
+# Full convert_price block: captures one amount (sold) OR ``$X,XXX - $Y,YYY`` (upcoming estimate).
+_CONVERT_PRICE_FULL_RE = re.compile(
+    r'<span[^>]*id=[\'"]convert_price[\'"][^>]*>([^<]+)</span>',
+    re.IGNORECASE,
+)
+_PRICE_LABEL_RE = re.compile(
+    r'<span[^>]*id=[\'"]label[\'"][^>]*>\s*([^<]+?)\s*</span>',
+    re.IGNORECASE,
+)
+# Reserve state: ``Offered Without Reserve`` | ``Reserve Met`` | ``Pending Reserve``.
+_RESERVE_RE = re.compile(
+    r'<div[^>]*class=[\'"]reserve[^\'"]*[\'"][^>]*>(.*?)</div>',
+    re.S | re.IGNORECASE,
+)
+# Vehicle description + highlights blocks.
+_DESCRIPTION_RE = re.compile(
+    r'<(div|section|article)[^>]*class=["\'][^"\']*about-vehicle-section[^"\']*["\'][^>]*>(.*?)</\1>',
+    re.S | re.IGNORECASE,
+)
+_HIGHLIGHTS_RE = re.compile(
+    r'<div[^>]*class=["\'][^"\']*highlights-content[^"\']*["\'][^>]*>(.*?)</div>',
+    re.S | re.IGNORECASE,
+)
+# ``<div class='price-row …'>`` wraps either the estimate block or a bare status
+# span like ``<span>Sold Before Auction</span>``. Capture the price-row body.
+_PRICE_ROW_RE = re.compile(
+    r'<div[^>]*class=["\'][^"\']*price-row[^"\']*["\'][^>]*>(.*?)</div>\s*</div>',
+    re.S | re.IGNORECASE,
+)
 _LOT_BRANCH_RE = re.compile(
     r'<p[^>]+class=[\'"]lot-and-branch[\'"][^>]*>(.*?)</p>',
     re.DOTALL | re.IGNORECASE,
@@ -133,6 +162,99 @@ def _parse_money_us(s: str | None) -> int | None:
     return int(m.group(1).replace(",", ""))
 
 
+def _extract_upcoming_status_text(html: str) -> str | None:
+    """When the price-row has no ``convert_price`` span, return its bare status text.
+
+    Real examples: ``Sold Before Auction``, ``Post-Auction Sale``, ``Withdrawn``.
+    Returns ``None`` if a normal estimate/price block is present (caller handles that).
+    """
+    for m in _PRICE_ROW_RE.finditer(html):
+        inner = m.group(1)
+        if "convert_price" in inner or "id='label'" in inner or 'id="label"' in inner:
+            continue
+        text = _html_to_text(inner)
+        text = re.sub(r"\bUSD|\bEUR|\bGBP|\bCHF", "", text).strip()
+        if text and len(text) < 60:
+            return text
+    return None
+
+
+def _parse_convert_price_block(html: str) -> tuple[int | None, int | None, str | None]:
+    """Return ``(low_or_hammer, high_or_none, label)``.
+
+    The ``convert_price`` span holds either ``$X,XXX`` (hammer for sold lots) or
+    ``$X,XXX - $Y,YYY`` (estimate range for upcoming). The adjacent ``label`` span
+    says ``Sold for`` / ``Estimate:`` / ``Bid to``.
+    """
+    label_m = _PRICE_LABEL_RE.search(html)
+    label = (html_lib.unescape(label_m.group(1)).strip().rstrip(":")
+             if label_m else None)
+    price_m = _CONVERT_PRICE_FULL_RE.search(html)
+    if not price_m:
+        return None, None, label
+    inner = html_lib.unescape(price_m.group(1)).strip()
+    amounts = [int(x.replace(",", "")) for x in re.findall(r"\$([\d,]+)", inner)]
+    if not amounts:
+        return None, None, label
+    if len(amounts) >= 2:
+        return amounts[0], amounts[1], label
+    return amounts[0], None, label
+
+
+def _html_to_text(raw: str) -> str:
+    text = re.sub(r"<br\s*/?>", "\n", raw, flags=re.I)
+    text = re.sub(r"</li>", "\n", text, flags=re.I)
+    text = re.sub(r"<li[^>]*>", "• ", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_lib.unescape(text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n", "\n\n", text).strip()
+    return text
+
+
+def _extract_description(html: str) -> str | None:
+    """Return the ``about-vehicle-section`` + ``highlights-content`` combined as text."""
+    if not html:
+        return None
+    parts: list[str] = []
+    hl = _HIGHLIGHTS_RE.search(html)
+    if hl:
+        txt = _html_to_text(hl.group(1))
+        if txt:
+            parts.append(f"Highlights:\n{txt}")
+    desc = _DESCRIPTION_RE.search(html)
+    if desc:
+        txt = _html_to_text(desc.group(2))
+        if txt:
+            parts.append(txt)
+    return "\n\n".join(parts) if parts else None
+
+
+def _extract_reserve(html: str) -> str | None:
+    """Return ``Without Reserve`` / ``Reserve Met`` etc from the reserve div."""
+    if not html:
+        return None
+    for m in _RESERVE_RE.finditer(html):
+        inner = m.group(1)
+        text = html_lib.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", inner))).strip()
+        text = text.lstrip("|").strip()
+        if text:
+            return text
+    return None
+
+
+def _split_lot_and_branch(text: str) -> tuple[str | None, str | None]:
+    """``Lot 201 | The Porsche Air|Water Auction 2026`` → (``201``, ``The Porsche Air|Water Auction 2026``).
+
+    Splits on the first pipe only — some auction names themselves contain pipes.
+    """
+    lm = re.search(r"Lot\s+([A-Za-z0-9\-]+)", text, re.I)
+    lot = lm.group(1) if lm else None
+    parts = text.split("|", 1)
+    auction = parts[1].strip() if len(parts) > 1 else None
+    return lot, auction
+
+
 def _schema_price_usd(offers: dict[str, Any]) -> int | None:
     """Broad Arrow encodes ``offers.price`` as fixed-point tenths of a USD."""
     raw = offers.get("price")
@@ -164,8 +286,14 @@ def _mileage_from_schema(car: dict[str, Any]) -> int | None:
     return n
 
 
-def parse_vehicle_detail(html: str | None, *, vehicle_path: str) -> dict[str, Any] | None:
-    """Parse one vehicle detail page into a normalised dict. Returns None if no Car JSON-LD."""
+def parse_vehicle_detail(
+    html: str | None, *, vehicle_path: str, mode: str = "past",
+) -> dict[str, Any] | None:
+    """Parse one vehicle detail page into a normalised dict. Returns None if no Car JSON-LD.
+
+    ``mode='past'``    → treat ``convert_price`` as hammer (existing behaviour).
+    ``mode='upcoming'`` → treat ``convert_price`` as estimate range and skip hammer.
+    """
     if not html or not str(html).strip():
         return None
 
@@ -183,18 +311,42 @@ def parse_vehicle_detail(html: str | None, *, vehicle_path: str) -> dict[str, An
         return None
 
     offers = car.get("offers") if isinstance(car.get("offers"), dict) else {}
-    hammer: int | None = None
-    price_span = _CONVERT_PRICE_RE.search(html)
-    if price_span:
-        hammer = _parse_money_us(price_span.group(1))
-    if hammer is None:
-        hammer = _schema_price_usd(offers)
-
-    currency = (offers.get("priceCurrency") or "USD").strip() or "USD"
     avail = str(offers.get("availability") or "")
-    sold = bool(hammer and hammer > 0)
-    if "OutOfStock" in avail and hammer:
-        sold = True
+    currency = (offers.get("priceCurrency") or "USD").strip() or "USD"
+
+    price_low, price_high, price_label = _parse_convert_price_block(html)
+    label_lower = (price_label or "").lower()
+
+    hammer: int | None = None
+    estimate_low: int | None = None
+    estimate_high: int | None = None
+    sold = False
+
+    upcoming_status: str | None = None
+    if mode == "upcoming":
+        # Upcoming: ``convert_price`` holds ``$low - $high`` estimate range, no hammer.
+        estimate_low = price_low
+        estimate_high = price_high
+        if estimate_low is None and estimate_high is None:
+            # No estimate block — this lot likely shows a status banner instead
+            # (e.g. "Sold Before Auction", "Post-Auction Sale", "Withdrawn").
+            upcoming_status = _extract_upcoming_status_text(html)
+    else:
+        # Past: prefer the ``convert_price`` span single-amount as hammer.
+        if price_low is not None and price_high is None and "estimate" not in label_lower:
+            hammer = price_low
+        elif price_low is not None and price_high is not None and "estimate" not in label_lower:
+            # Two amounts with a non-estimate label — rare, but keep the first as hammer.
+            hammer = price_low
+        elif price_low is not None and price_high is not None and "estimate" in label_lower:
+            # Estimate range on a past lot that didn't sell — record as estimate.
+            estimate_low = price_low
+            estimate_high = price_high
+        if hammer is None:
+            hammer = _schema_price_usd(offers)
+        sold = bool(hammer and hammer > 0)
+        if "OutOfStock" in avail and hammer:
+            sold = True
 
     year_raw = car.get("vehicleModelDate")
     year: int | None = None
@@ -239,19 +391,22 @@ def parse_vehicle_detail(html: str | None, *, vehicle_path: str) -> dict[str, An
         inner = html_lib.unescape(lb.group(1))
         soup_text = re.sub(r"<[^>]+>", " ", inner)
         soup_text = re.sub(r"\s+", " ", soup_text).strip()
-        lm = re.search(r"Lot\s+(\d+)", soup_text, re.I)
-        if lm:
-            lot_number = lm.group(1)
-        parts = [p.strip() for p in re.split(r"\|\s*", soup_text) if p.strip()]
-        if len(parts) >= 2:
-            auction_event = parts[-1].strip()
-        elif parts:
-            auction_event = parts[0]
+        lot_number, auction_event = _split_lot_and_branch(soup_text)
 
     image_url: str | None = None
     img = car.get("image")
     if isinstance(img, str):
         image_url = img.strip() or None
+
+    reserve = _extract_reserve(html)
+    description = _extract_description(html)
+
+    if mode == "upcoming":
+        # Default: empty for live-upcoming lots. If a banner like "Sold Before
+        # Auction" is present, surface that as the status instead.
+        sold_status = upcoming_status if upcoming_status else None
+    else:
+        sold_status = "Sold" if sold else "Unsold"
 
     return {
         "record_id": vehicle_path.replace("/", "__"),
@@ -268,11 +423,14 @@ def parse_vehicle_detail(html: str | None, *, vehicle_path: str) -> dict[str, An
         "transmission": None,
         "lot_number": lot_number,
         "hammer": hammer,
+        "estimate_low": estimate_low,
+        "estimate_high": estimate_high,
+        "reserve": reserve,
         "currency": currency,
-        "sold_status": "Sold" if sold else "Unsold",
+        "sold_status": sold_status,
         "selling_date": None,
         "image_url": image_url,
         "listing_url": f"{SITE_ORIGIN}/vehicles/{vehicle_path}",
         "auction_event": auction_event,
-        "listing_description": None,
+        "listing_description": description,
     }
