@@ -41,6 +41,9 @@ Usage:
     python scripts/run_scraper.py --source tc --mode new  --max-pages 2 --min-price 250000
     # uc: --max-pages = inventory pages (29 listings each); --min-price stops DESC scan
     python scripts/run_scraper.py --source uc --max-pages 3 --min-price 100000
+    # atca: --mode used|new; --max-pages = SRP pages (20 listings each); CAD→USD for --min-price
+    python scripts/run_scraper.py --source atca --mode used --max-pages 3 --min-price 100000
+    python scripts/run_scraper.py --source atca --mode new  --max-pages 3 --min-price 150000
     # bon: --max-pages = max ended Bonhams Cars auctions (0 = all ~593 auctions)
     python scripts/run_scraper.py --source bon --max-pages 1 --min-price 0
     # gooding: --max-pages = max lots to fetch (0 = all ~9k lots across every auction)
@@ -113,9 +116,10 @@ AVAILABLE_SOURCES = [
     "cg",  # classifieds — CarGurus (cargurus.com); use --mode used|new
     "tc",  # classifieds — TrueCar (truecar.com); use --mode used|new
     "uc",  # classifieds — UsedCars.com (usedcars.com); used-only feed
+    "atca",  # classifieds — AutoTrader.ca (autotrader.ca); use --mode used|new
 ]
 
-CLASSIFIEDS_SOURCES = {"dpr", "cars", "cg", "tc", "uc"}  # kept separate so main() picks the classifieds DB path
+CLASSIFIEDS_SOURCES = {"dpr", "cars", "cg", "tc", "uc", "atca"}  # kept separate so main() picks the classifieds DB path
 
 # Map CLI source code → the ``source`` column value we store in Supabase. Used
 # by the mark-removed step so it only flips rows for the scraper that just ran.
@@ -125,6 +129,7 @@ _CLASSIFIEDS_DOMAIN = {
     "cg": "cargurus.com",
     "tc": "truecar.com",
     "uc": "usedcars.com",
+    "atca": "autotrader.ca",
 }
 
 
@@ -496,6 +501,20 @@ def main() -> None:
             vehicle_filter=vehicle_filter,
         )
         records = asyncio.run(scraper.run())
+
+    elif args.source == "atca":
+        from scrapers.classifieds.autotrader_ca.scraper import AutoTraderCaScraper
+        atca_mode = args.mode if args.mode in ("used", "new") else "used"
+        scraper = AutoTraderCaScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+            mode=atca_mode,
+        )
+        records = asyncio.run(scraper.run())
+        _CLASSIFIEDS_DOMAIN["atca"] = f"autotrader.ca/{atca_mode}"
 
     # DB write is the default. Use --no-store-db to skip (e.g. for dry-run checks).
     if records and not args.no_store_db:
