@@ -124,6 +124,8 @@ def upsert_classified_record(record: dict) -> str:
 
     Returns: "inserted", "updated", or "skipped"
     """
+    from .schemas import CLASSIFIEDS_COLUMNS
+
     client = get_client()
 
     vin = record.get("VIN")
@@ -143,7 +145,17 @@ def upsert_classified_record(record: dict) -> str:
 
     if not existing.data:
         record["Listing_status"] = "Active"
-        client.table("classifieds").insert(_lowercase_keys(record)).execute()
+        # Strip ``Record_ID`` (Postgres UUID default will fill it in) and any
+        # fields outside the canonical schema — matches the auctions-insert policy.
+        allowed = set(CLASSIFIEDS_COLUMNS) - {"Record_ID"}
+        filtered = {k.lower(): record.get(k) for k in allowed}
+        # Legacy Supabase deployments have ``classifieds.record_id`` as ``TEXT
+        # NOT NULL`` without a default. Supply a UUID so the insert works on
+        # both the old and new schema.
+        import uuid
+
+        filtered["record_id"] = str(uuid.uuid4())
+        client.table("classifieds").insert(filtered).execute()
         return "inserted"
 
     row = existing.data[0]
@@ -152,7 +164,7 @@ def upsert_classified_record(record: dict) -> str:
     old_price = row.get("asking_price")
     new_price = record.get("Asking_price")
 
-    row_id = row.get("id") or row.get("record_id")
+    row_pk = row.get("record_id")
 
     if old_price is not None and new_price is not None and old_price != new_price:
         updates = {
@@ -164,17 +176,14 @@ def upsert_classified_record(record: dict) -> str:
             "last_seen_date": record.get("Last_seen_date"),
             "scraped_at": record.get("Scraped_at"),
         }
-        # Match on whichever PK the classifieds table uses.
-        client.table("classifieds").update(updates).eq(
-            "id" if "id" in row else "record_id", row_id,
-        ).execute()
+        client.table("classifieds").update(updates).eq("record_id", row_pk).execute()
         return "updated"
 
     # Same price — just update Last_seen_date
     client.table("classifieds").update({
         "last_seen_date": record.get("Last_seen_date"),
         "scraped_at": record.get("Scraped_at"),
-    }).eq("id" if "id" in row else "record_id", row_id).execute()
+    }).eq("record_id", row_pk).execute()
     return "skipped"
 
 
@@ -189,14 +198,14 @@ def mark_removed_classifieds(source: str, active_urls: set[str]) -> int:
 
     active_rows = (
         client.table("classifieds")
-        .select("id, listing_url")
+        .select("record_id, listing_url")
         .eq("source", source)
         .eq("listing_status", "Active")
         .execute()
     )
 
     to_remove = [
-        row["id"] for row in active_rows.data
+        row["record_id"] for row in active_rows.data
         if row["listing_url"] not in active_urls
     ]
 
@@ -205,7 +214,7 @@ def mark_removed_classifieds(source: str, active_urls: set[str]) -> int:
 
     client.table("classifieds").update({
         "listing_status": "Removed",
-    }).in_("id", to_remove).execute()
+    }).in_("record_id", to_remove).execute()
 
     logger.info(f"Marked {len(to_remove)} classifieds as Removed for {source}")
     return len(to_remove)
@@ -217,7 +226,7 @@ def check_relisted(vin: str, dealer: str, new_url: str) -> bool:
 
     existing = (
         client.table("classifieds")
-        .select("id")
+        .select("record_id")
         .eq("vin", vin)
         .eq("dealer_name", dealer)
         .neq("listing_url", new_url)

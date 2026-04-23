@@ -96,7 +96,55 @@ AVAILABLE_SOURCES = [
     "rms",  # event — RM Sotheby's (rmsothebys.com)
     "bon",  # event — Bonhams Cars (cars.bonhams.com)
     "gooding",  # event — Gooding & Company (goodingco.com)
+    "dpr",  # classifieds — duPont REGISTRY (dupontregistry.com)
 ]
+
+CLASSIFIEDS_SOURCES = {"dpr"}  # kept separate so main() picks the classifieds DB path
+
+# Map CLI source code → the ``source`` column value we store in Supabase. Used
+# by the mark-removed step so it only flips rows for the scraper that just ran.
+_CLASSIFIEDS_DOMAIN = {
+    "dpr": "dupontregistry.com",
+}
+
+
+def _store_classifieds(records: list[dict], source_code: str) -> None:
+    """Upsert classifieds lifecycle (insert / update / skipped) + mark stale rows.
+
+    Unlike auctions, every classified listing passes through a per-row helper
+    that diffs the old price vs the new one, and we run a ``Removed`` sweep at
+    the end for any Active row we didn't see this pass.
+    """
+    from shared.db import mark_removed_classifieds, upsert_classified_record
+
+    log = logging.getLogger(__name__)
+    tally = {"inserted": 0, "updated": 0, "skipped": 0}
+    seen_urls: set[str] = set()
+    for rec in records:
+        url = rec.get("Listing_url")
+        if not url:
+            continue
+        seen_urls.add(url)
+        try:
+            result = upsert_classified_record(rec)
+        except Exception as e:
+            log.error("Classifieds upsert failed for %s: %s", url, e)
+            continue
+        tally[result] = tally.get(result, 0) + 1
+
+    print(
+        f"Classifieds upsert: {tally['inserted']} inserted, "
+        f"{tally['updated']} updated, {tally['skipped']} unchanged",
+    )
+
+    domain = _CLASSIFIEDS_DOMAIN.get(source_code)
+    if domain:
+        try:
+            removed = mark_removed_classifieds(domain, seen_urls)
+            if removed:
+                print(f"Marked {removed} prior listings as Removed")
+        except Exception as e:
+            log.error("mark_removed_classifieds failed: %s", e)
 
 
 def main() -> None:
@@ -361,15 +409,29 @@ def main() -> None:
         )
         records = asyncio.run(scraper.run())
 
+    elif args.source == "dpr":
+        from scrapers.classifieds.dupont_registry.scraper import DupontRegistryScraper
+        scraper = DupontRegistryScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
     # DB write is the default. Use --no-store-db to skip (e.g. for dry-run checks).
     if records and not args.no_store_db:
-        from shared.db import insert_auction_records
-        try:
-            inserted = insert_auction_records(records)
-            print(f"Upserted {inserted} records to Supabase")
-        except Exception as e:
-            logging.getLogger(__name__).error("Supabase insert failed: %s", e)
-            print(f"Supabase insert FAILED: {e}")
+        if args.source in CLASSIFIEDS_SOURCES:
+            _store_classifieds(records, args.source)
+        else:
+            from shared.db import insert_auction_records
+            try:
+                inserted = insert_auction_records(records)
+                print(f"Upserted {inserted} records to Supabase")
+            except Exception as e:
+                logging.getLogger(__name__).error("Supabase insert failed: %s", e)
+                print(f"Supabase insert FAILED: {e}")
     elif args.no_store_db:
         print("Skipped Supabase write (--no-store-db)")
 
