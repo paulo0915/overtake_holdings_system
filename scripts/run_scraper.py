@@ -36,6 +36,9 @@ Usage:
     # cg: --mode used (default) or new; --max-pages = SRP pages (24 listings each)
     python scripts/run_scraper.py --source cg --mode used --max-pages 2 --min-price 200000
     python scripts/run_scraper.py --source cg --mode new  --max-pages 2 --min-price 250000
+    # tc: --mode used|new; --max-pages = GraphQL pages (30 listings each)
+    python scripts/run_scraper.py --source tc --mode used --max-pages 2 --min-price 200000
+    python scripts/run_scraper.py --source tc --mode new  --max-pages 2 --min-price 250000
     # bon: --max-pages = max ended Bonhams Cars auctions (0 = all ~593 auctions)
     python scripts/run_scraper.py --source bon --max-pages 1 --min-price 0
     # gooding: --max-pages = max lots to fetch (0 = all ~9k lots across every auction)
@@ -106,9 +109,10 @@ AVAILABLE_SOURCES = [
     "dpr",  # classifieds — duPont REGISTRY (dupontregistry.com)
     "cars",  # classifieds — Cars.com (cars.com)
     "cg",  # classifieds — CarGurus (cargurus.com); use --mode used|new
+    "tc",  # classifieds — TrueCar (truecar.com); use --mode used|new
 ]
 
-CLASSIFIEDS_SOURCES = {"dpr", "cars", "cg"}  # kept separate so main() picks the classifieds DB path
+CLASSIFIEDS_SOURCES = {"dpr", "cars", "cg", "tc"}  # kept separate so main() picks the classifieds DB path
 
 # Map CLI source code → the ``source`` column value we store in Supabase. Used
 # by the mark-removed step so it only flips rows for the scraper that just ran.
@@ -116,6 +120,7 @@ _CLASSIFIEDS_DOMAIN = {
     "dpr": "dupontregistry.com",
     "cars": "cars.com",
     "cg": "cargurus.com",
+    "tc": "truecar.com",
 }
 
 
@@ -462,6 +467,20 @@ def main() -> None:
         records = asyncio.run(scraper.run())
         # Scoped source tag for mark-removed (see cargurus/scraper.py comment).
         _CLASSIFIEDS_DOMAIN["cg"] = f"cargurus.com/{cg_mode}"
+
+    elif args.source == "tc":
+        from scrapers.classifieds.truecar.scraper import TrueCarScraper
+        tc_mode = args.mode if args.mode in ("used", "new") else "used"
+        scraper = TrueCarScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+            mode=tc_mode,
+        )
+        records = asyncio.run(scraper.run())
+        _CLASSIFIEDS_DOMAIN["tc"] = f"truecar.com/{tc_mode}"
 
     # DB write is the default. Use --no-store-db to skip (e.g. for dry-run checks).
     if records and not args.no_store_db:
