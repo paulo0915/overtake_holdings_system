@@ -29,6 +29,10 @@ Usage:
     python scripts/run_scraper.py --source rms --max-pages 1 --min-price 0
     # rms upcoming: current /upcoming/ auctions with Sold_status='Upcoming'
     python scripts/run_scraper.py --source rms --mode upcoming --max-pages 0
+    # dpr: --max-pages = GraphQL pages (24 listings each); --min-price stops DESC scan
+    python scripts/run_scraper.py --source dpr --max-pages 2 --min-price 100000
+    # cars: --max-pages = SRP pages (22 listings each); --min-price stops DESC scan
+    python scripts/run_scraper.py --source cars --max-pages 2 --min-price 250000
     # bon: --max-pages = max ended Bonhams Cars auctions (0 = all ~593 auctions)
     python scripts/run_scraper.py --source bon --max-pages 1 --min-price 0
     # gooding: --max-pages = max lots to fetch (0 = all ~9k lots across every auction)
@@ -97,14 +101,16 @@ AVAILABLE_SOURCES = [
     "bon",  # event — Bonhams Cars (cars.bonhams.com)
     "gooding",  # event — Gooding & Company (goodingco.com)
     "dpr",  # classifieds — duPont REGISTRY (dupontregistry.com)
+    "cars",  # classifieds — Cars.com (cars.com)
 ]
 
-CLASSIFIEDS_SOURCES = {"dpr"}  # kept separate so main() picks the classifieds DB path
+CLASSIFIEDS_SOURCES = {"dpr", "cars"}  # kept separate so main() picks the classifieds DB path
 
 # Map CLI source code → the ``source`` column value we store in Supabase. Used
 # by the mark-removed step so it only flips rows for the scraper that just ran.
 _CLASSIFIEDS_DOMAIN = {
     "dpr": "dupontregistry.com",
+    "cars": "cars.com",
 }
 
 
@@ -412,6 +418,17 @@ def main() -> None:
     elif args.source == "dpr":
         from scrapers.classifieds.dupont_registry.scraper import DupontRegistryScraper
         scraper = DupontRegistryScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+        )
+        records = asyncio.run(scraper.run())
+
+    elif args.source == "cars":
+        from scrapers.classifieds.cars_com.scraper import CarsComScraper
+        scraper = CarsComScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
