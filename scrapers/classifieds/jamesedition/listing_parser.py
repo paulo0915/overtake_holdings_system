@@ -186,14 +186,30 @@ _JSONLD_RE = re.compile(
 )
 
 # "About This Car" dealer description.
-_ABOUT_SECTION_RE = re.compile(
-    r'<h2>About This Car</h2>\s*<div class="je2-listing-about[^"]*">(.+?)</div>\s*</div>',
-    re.S | re.I,
-)
+#
+# JE's markup:
+#     <h2>About This Car</h2>
+#       <div class="je2-listing-about js-listing-about">
+#         <div class="je2-read-more js-read-more _original" data-block="">
+#           <div class="je2-read-more__preview _translated"></div>
+#           <div class="je2-read-more__preview _original">…prose…</div>
+#         </div>
+#       </div>
+#
+# We match the ``_original`` preview directly — a two-step
+# section→body chain breaks because the non-greedy section regex eats
+# ``</div>`` pairs that the body needs to terminate on. Direct match
+# works because ``_original`` classes don't occur elsewhere on the VDP.
 _ABOUT_BODY_RE = re.compile(
-    r'<div class="je2-read-more__preview _original"[^>]*>(.+?)</div>',
+    r'<div[^>]*class="je2-read-more__preview\s+_original"[^>]*>(.*?)</div>',
     re.S | re.I,
 )
+
+# Optional gate: only treat the match as the description when it appears
+# after the "About This Car" heading — prevents stray ``_original`` divs
+# elsewhere on the page from being picked up (none exist today, but the
+# guard keeps us honest if JE reuses the class name later).
+_ABOUT_HEADING_RE = re.compile(r'<h2>About This Car</h2>', re.I)
 
 
 # HTML → plain text (preserving paragraph structure).
@@ -270,13 +286,25 @@ def _extract_dealer_name(html: str) -> str | None:
 
 
 def _extract_description(html: str) -> str | None:
-    section = _ABOUT_SECTION_RE.search(html)
-    if not section:
+    """Pull dealer-written "About This Car" body.
+
+    Require the About heading to be present on the page (sanity gate),
+    then take the first ``_original`` preview that follows. An empty
+    body (dealer didn't write one) returns ``None``.
+    """
+    about_m = _ABOUT_HEADING_RE.search(html)
+    if not about_m:
         return None
-    body = _ABOUT_BODY_RE.search(section.group(1))
+    # Search only the slice after the heading so an unrelated preview
+    # elsewhere on the page can't be picked up by mistake.
+    body = _ABOUT_BODY_RE.search(html, about_m.end())
     if not body:
         return None
-    return _html_to_text(body.group(1))
+    raw = body.group(1).strip()
+    if not raw:
+        return None
+    cleaned = _html_to_text(raw)
+    return cleaned or None
 
 
 def parse_detail_html(html: str) -> dict[str, Any]:
