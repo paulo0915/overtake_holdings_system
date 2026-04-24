@@ -144,7 +144,32 @@ def _clean_description(text: str) -> str:
     if m:
         text = "KEY FACTS " + m.group(1).strip()
 
+    text = _strip_cc_footer(text)
+
     return text[:50_000]
+
+
+# Collecting Cars appends its legal T&Cs + (sometimes) a Spanish import-tax
+# disclaimer to every listing. Both are boilerplate — zero non-CC listings
+# contain them — so truncating from the first occurrence strips the tail
+# cleanly. See P2 §2.2 of the bug report. Known-string match is more robust
+# than CSS-selector based strip (a class rename on CC's end would break it).
+_CC_FOOTERS = (
+    "Descriptions are provided by the seller",
+    "Si compras un vehículo en un país distinto al tuyo",
+)
+
+
+def _strip_cc_footer(text: str) -> str:
+    """Truncate known CC boilerplate tails — English T&Cs and Spanish
+    import-tax disclaimer — wherever they first appear.
+    """
+    cut = len(text)
+    for marker in _CC_FOOTERS:
+        idx = text.find(marker)
+        if idx > 0 and idx < cut:
+            cut = idx
+    return text[:cut].rstrip()
 
 
 # ISO-style VINs (no I/O/Q), 11–17 chars — typical modern road cars.

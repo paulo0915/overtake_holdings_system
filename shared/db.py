@@ -124,9 +124,15 @@ def upsert_classified_record(record: dict) -> str:
 
     Returns: "inserted", "updated", or "skipped"
     """
+    from .normalizer import normalize_vin
     from .schemas import CLASSIFIEDS_COLUMNS
 
     client = get_client()
+
+    # Normalize VIN up-front: rejects placeholders (``.``, ``001``, chassis
+    # numbers, ``<vin>ENGINENO<engineno>`` concat bugs) to ``None`` so the
+    # column only stores decodable 17-char VINs. See P1 deep-dive §1.
+    record["VIN"] = normalize_vin(record.get("VIN"))
 
     vin = record.get("VIN")
     dealer = record.get("Dealer_name")

@@ -9,11 +9,19 @@ logger = logging.getLogger(__name__)
 
 
 def export_to_csv(records: list[dict], output_path: str | Path, columns: list[str]) -> Path:
-    """Export records to CSV with exact column order."""
+    """Export records to CSV with exact column order.
+
+    Encoding is plain ``utf-8`` (no BOM). ``utf-8-sig`` adds an ``EF BB BF``
+    prefix that Excel-for-Windows likes, but many consumers — Python's
+    stdlib ``csv.DictReader`` without ``utf-8-sig``, ``awk``/``grep``
+    pipelines, Node's ``csv-parse``, Go/Rust default CSV libs — treat the
+    BOM as part of the first column header and break. Modern Excel / pandas
+    handle bare UTF-8 fine.
+    """
     df = _build_dataframe(records, columns)
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False, encoding="utf-8-sig")
+    df.to_csv(path, index=False, encoding="utf-8")
     logger.info(f"Exported {len(df)} records to {path}")
     return path
 
@@ -47,6 +55,7 @@ def enrich_records(records: list[dict]) -> list[dict]:
         canonical_country_name,
         normalize_engine_spec,
         normalize_transmission,
+        normalize_vin,
     )
 
     for r in records:
@@ -64,6 +73,12 @@ def enrich_records(records: list[dict]) -> list[dict]:
         # leak into the DB.
         if r.get("Engine_spec"):
             r["Engine_spec"] = normalize_engine_spec(r["Engine_spec"])
+        # Reject placeholder / chassis-number / concat-bug VINs so the
+        # ``VIN`` column only contains decodable 17-char VINs. Per the
+        # P1 deep-dive, ~218 rows had things like ``.``, ``001``, ``DK28``,
+        # ``<vin>ENGINENO<engineno>`` stored under VIN.
+        if "VIN" in r:
+            r["VIN"] = normalize_vin(r.get("VIN"))
     return records
 
 

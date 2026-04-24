@@ -192,24 +192,40 @@ def parse_detail_html(html: str | None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     soup = BeautifulSoup(html, "lxml")
 
-    # ── VIN ────────────────────────────────────────────────────────────────────
-    m = re.search(r'"IdentificationNumber"\s*:\s*"([A-HJ-NPR-Z0-9]{17})"', html)
-    if m:
-        out["vin"] = m.group(1)
-    else:
-        m = re.search(r'IdentificationNumber\\":\\"([A-HJ-NPR-Z0-9]{17})', html)
-        if m:
-            out["vin"] = m.group(1)
-
     # ── Year / Make / Model ────────────────────────────────────────────────────
+    # Extract first — we use the Year/Brand block as the anchor for scoping
+    # the VIN lookup (the SBX page embeds "recently-viewed" listings whose
+    # JSON fields would otherwise leak into our VIN column; see P1 §1.3 —
+    # three pre-1981 cars ended up sharing a 2019 AMG GT VIN because the
+    # unscoped regex matched a sidebar listing's JSON).
     m = re.search(
         r'\\"Year\\":(\d{4}),\\"BrandName\\":\\"([^"\\]*)\\",\\"ModelName\\":\\"([^"\\]*)\\"',
         html,
     )
+    year_anchor_end: int | None = None
     if m:
         out["year"] = int(m.group(1))
         out["make"] = m.group(2).strip() or None
         out["model"] = m.group(3).strip() or None
+        year_anchor_end = m.end()
+
+    # ── VIN ────────────────────────────────────────────────────────────────────
+    # Scoped search: look for IdentificationNumber within ~2000 chars AFTER
+    # the canonical listing's Year/Brand/Model block. Related/recently-
+    # viewed widgets live much farther down the page in their own JSON
+    # islands; this window keeps us inside the primary listing.
+    if year_anchor_end is not None:
+        window = html[year_anchor_end:year_anchor_end + 2000]
+        m = re.search(r'"IdentificationNumber"\s*:\s*"([A-HJ-NPR-Z0-9]{17})"', window)
+        if not m:
+            m = re.search(r'IdentificationNumber\\":\\"([A-HJ-NPR-Z0-9]{17})', window)
+        if m:
+            out["vin"] = m.group(1)
+    # Pre-1981 vehicles didn't have 17-char VINs. If we ended up with a VIN
+    # anyway (stale cache from a prior parse of a sidebar widget, etc.),
+    # treat it as spurious — a car older than the VIN mandate can't have one.
+    if out.get("year") and int(out["year"]) < 1981:
+        out.pop("vin", None)
 
     sub_m = re.search(r'\\"Subtitle\\":\\"([^"\\]*)\\"', html)
     if sub_m and sub_m.group(1).strip():

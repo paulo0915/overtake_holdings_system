@@ -27,9 +27,19 @@ _CHASSIS_TAIL_RE = re.compile(
 )
 _YEAR_LEADING_RE = re.compile(r"^(?P<year>(?:19|20)\d{2})\b\s+(?P<rest>.+)$")
 
-# ``Chassis no. WP0ZZZ96ZPS470173`` — Bonhams labels it ``Chassis no.``; VIN-like tokens only.
+# ``Chassis no. WP0ZZZ96ZPS470173`` — Bonhams labels it ``Chassis no.``.
+#
+# Capture is whitespace-FREE: the source HTML has the chassis and engine
+# numbers in adjacent ``<dd>`` blocks that get joined with a space during
+# ``html_to_text``, producing prose like
+# ``Chassis no. WP0ZZZ96ZPS470173 Engine no. M96…``.
+# The previous capture group included ``\s`` and a 30-char max, which
+# greedily grabbed through the space and into the ``Engine no.`` label —
+# the subsequent ``re.sub(r"\s+", "")`` then collapsed the space out,
+# yielding VINs like ``WP0ZZZ96ZPS470173ENGINENO`` (see P1 §1.2 bug report).
+# ``[A-Z0-9\-*/]`` with no space stops at the first whitespace boundary.
 _CHASSIS_RE = re.compile(
-    r"Chassis\s*(?:no\.?|Number)\s*[:.]?\s*([A-Z0-9][A-Z0-9\-*/ ]{4,30})",
+    r"Chassis\s*(?:no\.?|Number)\s*[:.]?\s*([A-Z0-9][A-Z0-9\-*/]{4,24})",
     re.I,
 )
 _VIN_LIKE_RE = re.compile(r"^[A-HJ-NPR-Z0-9]{17}$", re.I)

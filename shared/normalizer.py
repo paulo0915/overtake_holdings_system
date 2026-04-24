@@ -173,6 +173,62 @@ def normalize_engine_spec(raw: str | None) -> str | None:
     return text
 
 
+# Modern VIN spec (ISO 3779): 17 chars, alphanumeric, excluding the letters
+# I, O, Q (which can be confused with 1 and 0). Pre-1981 vehicles used shorter
+# chassis numbers; race cars and one-offs use manufacturer-specific tags
+# (Shelby ``CSX3015``, Ferrari ``B73RS``, Porsche ``J386``). None of those
+# are legitimate VINs — they're chassis numbers, and scrapers that store
+# them under ``VIN`` pollute the column. Downstream consumers treat the
+# ``VIN`` column as "the thing you can decode with a standard VIN decoder",
+# so we reject anything not matching the modern spec and return ``None``.
+_VIN_RE = re.compile(r"^[A-HJ-NPR-Z0-9]{17}$")
+
+# Obvious placeholder strings that occasionally survive VIN extraction.
+# Checked case-insensitively after trimming.
+_VIN_PLACEHOLDERS = frozenset({
+    "", "-", "--", "---", "N/A", "NA", "NONE", "NULL", "TBD", "UNKNOWN",
+    "PENDING", "REQUEST", "ON REQUEST", "AVAILABLE UPON REQUEST",
+})
+
+
+def normalize_vin(raw: str | None) -> str | None:
+    """Return a valid 17-char VIN or ``None``.
+
+    Valid = matches ISO 3779 format (``[A-HJ-NPR-Z0-9]{17}`` — 17 chars,
+    alphanumeric, excluding ``I``/``O``/``Q``).
+
+    Everything else (placeholders ``.``, ``001``, ``213``; chassis numbers
+    like ``CSX3015``, ``DK28``, ``J386``; concat bugs like
+    ``<vin>ENGINENO<engineno>``) returns ``None``. This keeps the VIN
+    column decodable by standard VIN tools — race-car / pre-1981 chassis
+    tags belong in a separate ``Chassis_number`` column, not VIN.
+
+    Side effects:
+      * Strips surrounding whitespace.
+      * Uppercases (VINs are case-insensitive but standard form is upper).
+      * Trims an accidental ``ENGINENO<engine-no>`` suffix (Bonhams parser
+        bug — defensive catch here so bad rows still produce a clean VIN).
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip().upper()
+    if not s or s in _VIN_PLACEHOLDERS:
+        return None
+
+    # Bonhams-style ``<vin>ENGINENO<engineno>`` concat — defensive strip.
+    # The scraper fix in the Bonhams parser should prevent this upstream
+    # but we also catch it here in case any rows already landed in the DB
+    # or a new source has the same join bug.
+    if "ENGINENO" in s:
+        s = s.split("ENGINENO", 1)[0].strip()
+        if not s:
+            return None
+
+    if _VIN_RE.match(s):
+        return s
+    return None
+
+
 def normalize_transmission(raw: str | None) -> str | None:
     """Normalize transmission to ``"Manual"`` or ``"Automatic"`` (or ``None``).
 
