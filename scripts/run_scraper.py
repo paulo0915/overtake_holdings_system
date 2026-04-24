@@ -46,6 +46,12 @@ Usage:
     python scripts/run_scraper.py --source atca --mode new  --max-pages 3 --min-price 150000
     # je: --max-pages = SRP pages (30 listings each); USD floor; mixed new+used inventory
     python scripts/run_scraper.py --source je --max-pages 2 --min-price 200000
+    # atcom: --mode used|new|all (default all); --max-pages = REST pages (25 listings each)
+    #         OPENS A BROWSER WINDOW briefly to prime Akamai cookies.
+    #         Requires residential IP — datacenter IPs are blocked regardless of cookies.
+    python scripts/run_scraper.py --source atcom --mode all --max-pages 2 --min-price 100000
+    python scripts/run_scraper.py --source atcom --mode used --max-pages 2 --min-price 100000
+    python scripts/run_scraper.py --source atcom --mode new  --max-pages 2 --min-price 150000
     # bon: --max-pages = max ended Bonhams Cars auctions (0 = all ~593 auctions)
     python scripts/run_scraper.py --source bon --max-pages 1 --min-price 0
     # gooding: --max-pages = max lots to fetch (0 = all ~9k lots across every auction)
@@ -62,7 +68,10 @@ from pathlib import Path
 # curl_cffi requires the selector event loop on Windows (ProactorEventLoop lacks
 # add_reader which curl_cffi's async internals need). But Playwright (used by C&B)
 # needs the Proactor loop to spawn subprocesses, so skip this for --source cab.
-if sys.platform == "win32" and "cab" not in sys.argv:
+# curl_cffi wants Selector loop on Windows. But Playwright (used by ``cab``
+# and ``atcom`` for its Akamai cookie-priming step) wants Proactor for
+# subprocess spawning. Skip Selector policy for those sources.
+if sys.platform == "win32" and not any(s in sys.argv for s in ("cab", "atcom")):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # Ensure project root is on path
@@ -120,9 +129,10 @@ AVAILABLE_SOURCES = [
     "uc",  # classifieds — UsedCars.com (usedcars.com); used-only feed
     "atca",  # classifieds — AutoTrader.ca (autotrader.ca); use --mode used|new
     "je",  # classifieds — JamesEdition (jamesedition.com); mixed new+used
+    "atcom",  # classifieds — AutoTrader.com (autotrader.com); --mode used|new|all
 ]
 
-CLASSIFIEDS_SOURCES = {"dpr", "cars", "cg", "tc", "uc", "atca", "je"}  # kept separate so main() picks the classifieds DB path
+CLASSIFIEDS_SOURCES = {"dpr", "cars", "cg", "tc", "uc", "atca", "je", "atcom"}  # kept separate so main() picks the classifieds DB path
 
 # Map CLI source code → the ``source`` column value we store in Supabase. Used
 # by the mark-removed step so it only flips rows for the scraper that just ran.
@@ -134,6 +144,7 @@ _CLASSIFIEDS_DOMAIN = {
     "uc": "usedcars.com",
     "atca": "autotrader.ca",
     "je": "jamesedition.com",
+    "atcom": "autotrader.com",
 }
 
 
@@ -198,11 +209,11 @@ def main() -> None:
     parser.add_argument("--use-filter", action="store_true", help="Apply vehicle filter from tracking file")
     parser.add_argument(
         "--mode", type=str, default="past",
-        choices=["past", "upcoming", "used", "new"],
+        choices=["past", "upcoming", "used", "new", "all"],
         help=(
             "Mode selector. Event-auction scrapers accept 'past'/'upcoming' "
-            "(default 'past'). CarGurus accepts 'used'/'new' (default 'used' "
-            "if left on 'past')."
+            "(default 'past'). CarGurus / TrueCar / AutoTrader.ca accept "
+            "'used'/'new'. AutoTrader.com accepts 'used'/'new'/'all'."
         ),
     )
     parser.add_argument(
@@ -530,6 +541,27 @@ def main() -> None:
             vehicle_filter=vehicle_filter,
         )
         records = asyncio.run(scraper.run())
+
+    elif args.source == "atcom":
+        from scrapers.classifieds.autotrader_com.scraper import AutoTraderComScraper
+        atcom_mode = args.mode if args.mode in ("used", "new", "all") else "all"
+        scraper = AutoTraderComScraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+            mode=atcom_mode,
+        )
+        records = asyncio.run(scraper.run())
+        # Match the source-tag logic in the scraper: bare ``autotrader.com``
+        # for the mixed feed, ``autotrader.com/<mode>`` only when the run
+        # is scoped to a specific listing type.
+        _CLASSIFIEDS_DOMAIN["atcom"] = (
+            "autotrader.com"
+            if atcom_mode == "all"
+            else f"autotrader.com/{atcom_mode}"
+        )
 
     # DB write is the default. Use --no-store-db to skip (e.g. for dry-run checks).
     if records and not args.no_store_db:

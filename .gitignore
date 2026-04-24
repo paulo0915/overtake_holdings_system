@@ -32,3 +32,6 @@ debug_*.html
 
 # Old standalone scraper (kept for reference)
 bat_scraper/
+
+# DB seed files containing credentials (e.g. proxy list)
+db/seeds/
