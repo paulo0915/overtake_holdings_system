@@ -291,6 +291,42 @@ def parse_year_from_title(title: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+# ---------------------------------------------------------------------------
+# Makes that are definitively NOT passenger cars.  Any scraped record whose
+# Make field (after normalisation) exactly matches one of these values is
+# rejected by the vehicle filter regardless of the whitelist spreadsheet.
+# ---------------------------------------------------------------------------
+NON_CAR_MAKES: frozenset[str] = frozenset({
+    # ── Aircraft ──────────────────────────────────────────────────────────
+    "Bombardier", "Learjet", "Lear", "Cessna", "Gulfstream", "Piper",
+    "Beechcraft", "Dassault", "Embraer", "Airbus", "Boeing",
+    "De Havilland",   # aircraft OEM (not the car)
+    # ── Boats / watercraft ─────────────────────────────────────────────────
+    "Riva", "Chris-Craft", "Midnight Express", "Sea Ray", "Bertram",
+    "Hatteras", "Sunseeker", "Azimut", "Ferretti", "Pershing",
+    "Princess", "Beneteau", "Catalina", "Malibu",
+    # ── Commercial trucks ──────────────────────────────────────────────────
+    "Kenworth", "Peterbilt", "Mack", "Western Star", "Freightliner",
+    # Note: "International" alone is ambiguous (pre-war cars exist), so we
+    # block "International Harvester" and rely on model checks for trucks.
+    "International Harvester",
+    # ── Buses / coaches ────────────────────────────────────────────────────
+    "Bedford",          # Bedford trucks/buses (not the historic Bedford car)
+    "Blue Bird",
+    "Thomas Built",
+})
+
+# Lowercase set for fast case-insensitive lookup.
+_NON_CAR_MAKES_LOWER: frozenset[str] = frozenset(m.lower() for m in NON_CAR_MAKES)
+
+
+def is_non_car_make(make: str | None) -> bool:
+    """Return True when *make* is a definitively non-car manufacturer."""
+    if not make:
+        return False
+    return make.strip().lower() in _NON_CAR_MAKES_LOWER
+
+
 _KNOWN_MAKES = [
     "Aston Martin", "Gordon Murray Automotive", "Mercedes-Benz", "Mercedes-AMG",
     "Alfa Romeo", "Land Rover", "De Tomaso", "Rolls-Royce",
@@ -300,7 +336,7 @@ _KNOWN_MAKES = [
     "Maserati", "Bentley", "Jaguar", "Lotus",
     "Pontiac", "Plymouth", "AMC", "Saleen", "SSC", "Rimac",
     "Hennessey", "W Motors", "Czinger", "Lucid", "Tesla",
-    "De Havilland", "Bristol Cars", "Pininfarina",
+    "Bristol Cars", "Pininfarina",
 ]
 
 # Sorted longest-first so multi-word makes match before their single-word prefix.
@@ -441,6 +477,42 @@ def get_scraped_at() -> str:
     Brief spec: Scraped_at must be UTC ending with 'Z' (e.g. 2026-04-22T23:29:05Z).
     """
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def to_utc_z(ts: str | None) -> str | None:
+    """Normalise an ISO 8601 timestamp (with any offset) to UTC ending with 'Z'.
+
+    Returns *None* when the input is falsy or unparseable.
+
+    Examples:
+        "2026-04-22T16:25:01-0700" → "2026-04-22T23:25:01Z"
+        "2026-04-22T23:25:01Z"     → "2026-04-22T23:25:01Z"   (no-op)
+        "2026-04-22T23:25:01+00:00"→ "2026-04-22T23:25:01Z"
+    """
+    if not ts:
+        return None
+    ts_s = str(ts).strip()
+    if not ts_s:
+        return None
+    # Already UTC-Z form
+    if ts_s.endswith("Z"):
+        return ts_s
+    # Try standard fromisoformat (Python 3.11+) then fallback strptime variants
+    for fmt in (None, "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z",
+                "%Y-%m-%d %H:%M:%S%z"):
+        try:
+            if fmt is None:
+                dt = datetime.fromisoformat(ts_s)
+            else:
+                dt = datetime.strptime(ts_s, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (ValueError, TypeError):
+            continue
+    return ts_s  # return original if unparseable
 
 
 # ── Description field extraction (shared by all scrapers) ───────────────────

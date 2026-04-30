@@ -210,22 +210,43 @@ def parse_detail_html(html: str | None) -> dict[str, Any]:
         year_anchor_end = m.end()
 
     # ── VIN ────────────────────────────────────────────────────────────────────
-    # Scoped search: look for IdentificationNumber within ~2000 chars AFTER
-    # the canonical listing's Year/Brand/Model block. Related/recently-
+    # Scoped search: look for IdentificationNumber within ~1500 chars AFTER
+    # the canonical listing's Year/Brand/Model block.  Related/recently-
     # viewed widgets live much farther down the page in their own JSON
     # islands; this window keeps us inside the primary listing.
+    # Window reduced from 2000 to 1500 to reduce sidebar bleed-through.
     if year_anchor_end is not None:
-        window = html[year_anchor_end:year_anchor_end + 2000]
+        window = html[year_anchor_end:year_anchor_end + 1500]
         m = re.search(r'"IdentificationNumber"\s*:\s*"([A-HJ-NPR-Z0-9]{17})"', window)
         if not m:
             m = re.search(r'IdentificationNumber\\":\\"([A-HJ-NPR-Z0-9]{17})', window)
         if m:
             out["vin"] = m.group(1)
-    # Pre-1981 vehicles didn't have 17-char VINs. If we ended up with a VIN
-    # anyway (stale cache from a prior parse of a sidebar widget, etc.),
-    # treat it as spurious — a car older than the VIN mandate can't have one.
-    if out.get("year") and int(out["year"]) < 1981:
+
+    # ── VIN validity cross-checks ──────────────────────────────────────────────
+    # 1. Pre-1981 vehicles didn't have 17-char VINs — drop any we captured.
+    listing_year = out.get("year")
+    if listing_year and int(listing_year) < 1981:
         out.pop("vin", None)
+
+    # 2. VIN year-code vs listing year.  Position 10 of a post-1980 VIN
+    #    encodes the model year.  If the decoded year differs from the listing
+    #    year by more than 2 (allowable for early/late production overlap),
+    #    the VIN almost certainly belongs to a different sidebar listing.
+    _VIN_YEAR_CHARS = "ABCDEFGHJKLMNPRSTVWXY123456789"
+    _VIN_YEAR_BASE  = 1980
+    if out.get("vin") and listing_year:
+        vin_str = out["vin"]
+        year_char = vin_str[9].upper()
+        if year_char in _VIN_YEAR_CHARS:
+            vin_year = _VIN_YEAR_BASE + _VIN_YEAR_CHARS.index(year_char) + 1
+            if abs(vin_year - int(listing_year)) > 2:
+                import logging as _log
+                _log.getLogger(__name__).warning(
+                    "SBX VIN year mismatch: listing=%s vin=%s vin_year_code=%s — dropping VIN",
+                    listing_year, vin_str, vin_year,
+                )
+                out.pop("vin", None)
 
     sub_m = re.search(r'\\"Subtitle\\":\\"([^"\\]*)\\"', html)
     if sub_m and sub_m.group(1).strip():

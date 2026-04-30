@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from shared.config import MAX_PRICE_USD
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,6 +33,18 @@ def build_record(
 
     vin = pick("vin")
     price = pick("asking_price")
+
+    # Sanity-cap: cars.com sometimes returns a listPrice that is in a
+    # different scale than the SRP price (cents instead of dollars, or a
+    # wrong field).  Any price above MAX_PRICE_USD is almost certainly a
+    # data error; null it so the row is not stored with a garbage price.
+    if price is not None and float(price) > MAX_PRICE_USD:
+        logger.warning(
+            "cars.com price %s exceeds MAX_PRICE_USD=%s — nulling (url=%s)",
+            price, MAX_PRICE_USD, flat.get("listing_url", "")[:80],
+        )
+        price = None
+
     mileage_mi = pick("mileage_mi")
     image_url = pick("image_url")
     dealer_name = pick("dealer_name")

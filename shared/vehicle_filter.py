@@ -248,6 +248,19 @@ class VehicleFilter:
         if self._check_exclusions(title, excerpt):
             return None
 
+        # Reject definitive non-car makes before the whitelist check so that
+        # broad "All models" rules (Ford, Chevrolet, etc.) never match trucks,
+        # aircraft, or boats scraped from sites with mixed inventory.
+        from .normalizer import NON_CAR_MAKES
+        title_lower = title.strip().lower()
+        for non_car in NON_CAR_MAKES:
+            nc_lower = non_car.lower()
+            # Word-boundary check: "riva" must not fire on "rival" or "arrival".
+            pattern = rf'\b{re.escape(nc_lower)}\b'
+            if re.search(pattern, title_lower):
+                logger.debug(f"Rejected non-car make '{non_car}' in title: {title[:80]}")
+                return None
+
         title_clean = title.strip()
 
         # Bertone remapping

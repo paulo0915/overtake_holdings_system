@@ -15,8 +15,11 @@ load_dotenv(_env_path)
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-# === Price threshold ===
+# === Price thresholds ===
 MIN_PRICE_USD = int(os.getenv("MIN_PRICE_USD", "500000"))
+# Upper sanity cap — any asking/selling price above this is almost certainly a
+# data error (wrong currency unit, cents instead of dollars, etc.).
+MAX_PRICE_USD = int(os.getenv("MAX_PRICE_USD", "20000000"))  # $20 M
 
 # === Vehicle filter ===
 VEHICLE_FILTER_FILE = _PROJECT_ROOT / os.getenv(

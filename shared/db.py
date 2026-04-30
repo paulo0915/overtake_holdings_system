@@ -150,17 +150,30 @@ def upsert_classified_record(record: dict) -> str:
     existing = query.execute()
 
     if not existing.data:
-        record["Listing_status"] = "Active"
-        # Strip ``Record_ID`` (Postgres UUID default will fill it in) and any
-        # fields outside the canonical schema — matches the auctions-insert policy.
+        # Cross-source VIN dedup: if a row with the same VIN already exists
+        # from ANY source (different listing_url), this is the same physical
+        # car listed on multiple platforms.  Flag it for review instead of
+        # silently inserting a clean duplicate.
+        listing_status = "Active"
+        if vin:
+            vin_elsewhere = (
+                client.table("classifieds")
+                .select("listing_url, source")
+                .eq("vin", vin)
+                .neq("listing_url", url)
+                .limit(1)
+                .execute()
+            )
+            if vin_elsewhere.data:
+                listing_status = "Dedup-Review"
+
+        record["Listing_status"] = listing_status
         allowed = set(CLASSIFIEDS_COLUMNS) - {"Record_ID"}
         filtered = {k.lower(): record.get(k) for k in allowed}
-        # Legacy Supabase deployments have ``classifieds.record_id`` as ``TEXT
-        # NOT NULL`` without a default. Supply a UUID so the insert works on
-        # both the old and new schema.
         import uuid
 
         filtered["record_id"] = str(uuid.uuid4())
+        filtered["listing_status"] = listing_status.lower()
         client.table("classifieds").insert(filtered).execute()
         return "inserted"
 
