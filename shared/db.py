@@ -79,6 +79,27 @@ def insert_auction_records(records: list[dict]) -> int:
         logger.debug(f"Batch {i // AUCTION_BATCH_SIZE + 1}: upserted {len(batch)} records")
 
     logger.info(f"Upserted {inserted} auction records to Supabase")
+
+    # Post-event sanity log: count rows that should have flipped Upcoming→Completed.
+    # Any source that just wrote "Completed" records may have overwritten pre-event rows.
+    completed_sources = {r.get("source") for r in valid if r.get("auction_status") == "completed"}
+    for src in completed_sources:
+        try:
+            remaining = (
+                client.table("auctions")
+                .select("listing_url", count="exact")
+                .eq("source", src)
+                .eq("auction_status", "Upcoming")
+                .execute()
+                .count or 0
+            )
+            logger.info(
+                "Post-upsert sanity [%s]: %s rows still Upcoming (expected 0 for "
+                "any events whose dates have passed)", src, remaining,
+            )
+        except Exception:
+            pass
+
     return inserted
 
 

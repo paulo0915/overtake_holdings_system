@@ -6,6 +6,7 @@ import html as html_lib
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any
 from urllib.parse import urljoin
 
@@ -20,6 +21,9 @@ logger = logging.getLogger(__name__)
 # --- Regexes -----------------------------------------------------------------
 
 _EVENT_PATH_RE = re.compile(r'href=["\'](/events/event/[^"\']+)["\']', re.IGNORECASE)
+
+# Extract event slug from a vehicle path or URL: "ve26_r0025/some-title" → "ve26"
+_EVENT_SLUG_RE = re.compile(r"(?:vehicles/)?([a-z0-9]+)_r\d+", re.IGNORECASE)
 
 _BRANCH_RESULTS_URL_RE = re.compile(
     r'href=["\']('
@@ -117,6 +121,113 @@ def parse_branch_results_url_from_event(html: str | None) -> str | None:
         f"{SITE_ORIGIN}{RESULTS_PATH}"
         f"?q[branch_id_eq]={branch_id}&{SORT_PARAM}={SORT_VALUE}"
     )
+
+
+def extract_event_slug(vehicle_path: str) -> str | None:
+    """Extract the event slug from a vehicle path or URL.
+
+    Examples:
+        "ve26_r0025/2024-porsche-..."  → "ve26"
+        "/vehicles/po26_r0010/1970-..."  → "po26"
+        "gi26v_r0003/..."  → "gi26v"
+    """
+    m = _EVENT_SLUG_RE.search(vehicle_path or "")
+    return m.group(1).lower() if m else None
+
+
+# Location keywords in priority order: (keyword_in_lowercase, country, currency)
+_LOC_CURRENCY_HINTS: list[tuple[str, str, str]] = [
+    # Italian cities / venues
+    ("cernobbio", "Italy", "EUR"),
+    ("villa erba", "Italy", "EUR"),
+    ("villa d'este", "Italy", "EUR"),
+    ("villa este", "Italy", "EUR"),
+    ("maranello", "Italy", "EUR"),
+    ("milan", "Italy", "EUR"),
+    (" italy", "Italy", "EUR"),
+    ("italian", "Italy", "EUR"),
+    # Monaco
+    ("monte carlo", "Monaco", "EUR"),
+    (" monaco", "Monaco", "EUR"),
+    # France
+    ("paris", "France", "EUR"),
+    ("le mans", "France", "EUR"),
+    (" france", "France", "EUR"),
+    # Germany
+    ("munich", "Germany", "EUR"),
+    ("stuttgart", "Germany", "EUR"),
+    (" germany", "Germany", "EUR"),
+    # Switzerland
+    ("geneva", "Switzerland", "CHF"),
+    ("zurich", "Switzerland", "CHF"),
+    ("switzerland", "Switzerland", "CHF"),
+    # UK
+    ("goodwood", "UK", "GBP"),
+    ("london", "UK", "GBP"),
+    ("newport pagnell", "UK", "GBP"),
+    ("united kingdom", "UK", "GBP"),
+    ("england", "UK", "GBP"),
+    (" uk", "UK", "GBP"),
+    # USA cities
+    ("costa mesa", "USA", "USD"),
+    ("scottsdale", "USA", "USD"),
+    ("monterey", "USA", "USD"),
+    ("pebble beach", "USA", "USD"),
+    ("amelia island", "USA", "USD"),
+    ("greenwich", "USA", "USD"),
+    ("las vegas", "USA", "USD"),
+    ("california", "USA", "USD"),
+    ("united states", "USA", "USD"),
+    (" usa", "USA", "USD"),
+    # Other
+    ("canada", "Canada", "CAD"),
+    ("japan", "Japan", "JPY"),
+    ("australia", "Australia", "AUD"),
+    ("dubai", "UAE", "USD"),
+]
+
+_MONTHS = (
+    "January|February|March|April|May|June|July|August|"
+    "September|October|November|December"
+)
+_DATE_RE = re.compile(
+    rf"\b(\d{{1,2}})(?:[–\-]\d{{1,2}})?\s+({_MONTHS})\s+(\d{{4}})\b",
+    re.IGNORECASE,
+)
+
+
+def parse_event_meta_from_html(html: str | None) -> dict[str, str | None]:
+    """Extract event metadata from a Broad Arrow event page.
+
+    Returns ``{"country": ..., "currency": ..., "date": "YYYY-MM-DD" | None}``.
+    Falls back to ``{"country": None, "currency": None, "date": None}`` on failure.
+    """
+    meta: dict[str, str | None] = {"country": None, "currency": None, "date": None}
+    if not html:
+        return meta
+
+    # Strip tags and collapse whitespace for text search.
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"\s+", " ", html_lib.unescape(text)).strip()
+    text_lower = text.lower()
+
+    for keyword, country, currency in _LOC_CURRENCY_HINTS:
+        if keyword in text_lower:
+            meta["country"] = country
+            meta["currency"] = currency
+            break
+
+    date_m = _DATE_RE.search(text)
+    if date_m:
+        try:
+            dt = datetime.strptime(
+                f"{date_m.group(1)} {date_m.group(2)} {date_m.group(3)}", "%d %B %Y"
+            )
+            meta["date"] = dt.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+
+    return meta
 
 
 def parse_vehicle_paths_from_results(html: str | None) -> list[str]:

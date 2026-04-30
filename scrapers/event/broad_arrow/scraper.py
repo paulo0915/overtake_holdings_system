@@ -30,6 +30,7 @@ from .api_client import (
     branch_results_page_url,
     fetch_branch_results_html,
     fetch_event_html,
+    fetch_event_meta_html,
     fetch_past_auctions_html,
     fetch_upcoming_vehicles_html,
     fetch_vehicle_html,
@@ -37,8 +38,10 @@ from .api_client import (
 )
 from .config import SITE_ORIGIN
 from .listing_parser import (
+    extract_event_slug,
     next_results_page_url,
     parse_branch_results_url_from_event,
+    parse_event_meta_from_html,
     parse_event_paths_from_past_auctions,
     parse_vehicle_detail,
     parse_vehicle_paths_from_results,
@@ -110,13 +113,14 @@ class BroadArrowScraper(BaseScraper):
                 logger.debug("Secondary warmup failed: %s", e)
             await asyncio.sleep(REQUEST_DELAY_SECONDS * 0.3 + random.uniform(0.1, 0.3))
 
-            # --- Step 2: discover vehicle paths ------------------------------
+            # --- Step 2: discover vehicle paths + collect event metadata ------
             if self.mode == "upcoming":
-                all_paths = await self._discover_upcoming(client, max_events)
+                all_paths, event_meta = await self._discover_upcoming(client, max_events)
             else:
-                all_paths = await self._discover_past(client, max_events)
+                all_paths, event_meta = await self._discover_past(client, max_events)
 
             logger.info("Collected %s unique vehicle paths — fetching details", len(all_paths))
+            logger.info("Event metadata cache: %s slug(s): %s", len(event_meta), list(event_meta))
 
             # --- Step 3: concurrent detail fetches ---------------------------
             detail_conc = max(1, min(self.max_concurrent, 5))
@@ -148,6 +152,7 @@ class BroadArrowScraper(BaseScraper):
             scraped_at = get_scraped_at()
             records = await record_builder.build_records(
                 rows, fx, self.vehicle_filter, scraped_at, mode=self.mode,
+                event_meta=event_meta,
             )
 
             before = len(records)
@@ -173,16 +178,23 @@ class BroadArrowScraper(BaseScraper):
         logger.info("=" * 60)
         return records
 
-    async def _discover_past(self, client, max_events: int) -> list[str]:
-        """Original event-driven discovery: /past-auctions → per-event branch results."""
+    async def _discover_past(
+        self, client, max_events: int
+    ) -> tuple[list[str], dict[str, dict]]:
+        """Original event-driven discovery: /past-auctions → per-event branch results.
+
+        Returns ``(vehicle_paths, event_meta_cache)`` where ``event_meta_cache`` maps
+        event slug → ``{"country": ..., "currency": ..., "date": ...}``.
+        """
         all_paths: list[str] = []
         seen_paths: set[str] = set()
+        event_meta: dict[str, dict] = {}
 
         try:
             pa_html = await fetch_past_auctions_html(client)
         except Exception as e:
             logger.error("Failed to fetch /past-auctions: %s", e)
-            return []
+            return [], {}
 
         event_paths = parse_event_paths_from_past_auctions(pa_html)
         logger.info("Found %s auction events on /past-auctions", len(event_paths))
@@ -193,7 +205,9 @@ class BroadArrowScraper(BaseScraper):
 
         for ev_idx, event_path in enumerate(event_paths, start=1):
             event_url = SITE_ORIGIN + event_path
-            logger.info("[%s/%s] Event: %s", ev_idx, len(event_paths), event_path)
+            # Extract slug from path like "/events/event/ve26"
+            slug = event_path.rstrip("/").rsplit("/", 1)[-1].lower()
+            logger.info("[%s/%s] Event: %s (slug=%s)", ev_idx, len(event_paths), event_path, slug)
             await asyncio.sleep(REQUEST_DELAY_SECONDS * 0.6 + random.uniform(0.1, 0.5))
 
             try:
@@ -201,6 +215,15 @@ class BroadArrowScraper(BaseScraper):
             except Exception as e:
                 logger.warning("Failed event page %s: %s — skipping", event_path, e)
                 continue
+
+            # Parse event metadata (country/currency/date) from the event page HTML
+            if slug and slug not in event_meta:
+                meta = parse_event_meta_from_html(ev_html)
+                event_meta[slug] = meta
+                logger.info(
+                    "  Event meta: country=%s currency=%s date=%s",
+                    meta.get("country"), meta.get("currency"), meta.get("date"),
+                )
 
             branch_base = parse_branch_results_url_from_event(ev_html)
             if not branch_base:
@@ -239,10 +262,18 @@ class BroadArrowScraper(BaseScraper):
                 page += 1
             logger.info("  Event done: %s vehicle paths across %s result page(s)",
                         event_paths_count, page)
-        return all_paths
+        return all_paths, event_meta
 
-    async def _discover_upcoming(self, client, max_pages: int) -> list[str]:
-        """Paginate ``/vehicles`` — defaults to upcoming-only, all active branches."""
+    async def _discover_upcoming(
+        self, client, max_pages: int
+    ) -> tuple[list[str], dict[str, dict]]:
+        """Paginate ``/vehicles`` — defaults to upcoming-only, all active branches.
+
+        Returns ``(vehicle_paths, event_meta_cache)`` where ``event_meta_cache`` maps
+        event slug → ``{"country": ..., "currency": ..., "date": ...}``.
+        After collecting all paths, fetches the event metadata page once per unique
+        slug so that country/currency/date can be stored per lot.
+        """
         all_paths: list[str] = []
         seen_paths: set[str] = set()
         page = 1
@@ -270,7 +301,32 @@ class BroadArrowScraper(BaseScraper):
                 break
             page += 1
             await asyncio.sleep(REQUEST_DELAY_SECONDS * 0.35 + random.uniform(0.05, 0.25))
-        return all_paths
+
+        # Collect unique event slugs and fetch event metadata pages (one per slug).
+        event_meta_cache: dict[str, dict] = {}
+        unique_slugs: list[str] = []
+        seen_slugs: set[str] = set()
+        for p in all_paths:
+            slug = extract_event_slug(p)
+            if slug and slug not in seen_slugs:
+                seen_slugs.add(slug)
+                unique_slugs.append(slug)
+
+        for slug in unique_slugs:
+            try:
+                await asyncio.sleep(REQUEST_DELAY_SECONDS * 0.3 + random.uniform(0.05, 0.2))
+                meta_html = await fetch_event_meta_html(client, slug)
+                meta = parse_event_meta_from_html(meta_html)
+                event_meta_cache[slug] = meta
+                logger.info(
+                    "Event meta [%s]: country=%s currency=%s date=%s",
+                    slug, meta.get("country"), meta.get("currency"), meta.get("date"),
+                )
+            except Exception as e:
+                logger.warning("Could not fetch event meta for slug %r: %s", slug, e)
+                event_meta_cache[slug] = {"country": None, "currency": None, "date": None}
+
+        return all_paths, event_meta_cache
 
     def _row_meets_min_price(self, row: dict) -> bool:
         usd = row.get("Selling_price_USD")

@@ -36,6 +36,7 @@ from .api_client import (
 from .config import AUCTION_LOTS_PER_PAGE, SITE_ORIGIN
 from .listing_parser import (
     build_lot_detail_url,
+    extract_vin_from_url,
     is_car_lot,
     parse_auction_hits,
     parse_lot_detail_next_data,
@@ -212,8 +213,17 @@ class BonhamsScraper(BaseScraper):
 
                     record_id = f"bon_{aid}_{lot_no}"
                     listing_url = build_lot_detail_url(aid, lot_no, lot_slug)
+                    # VIN fallback: if description extraction found nothing, try the URL slug.
+                    # Priority: description > URL (description is more complete when present).
+                    row_vin = detail.get("vin")
+                    if not row_vin:
+                        row_vin = extract_vin_from_url(listing_url)
+                        if row_vin:
+                            logger.debug("VIN from URL slug for %s: %s", listing_url, row_vin)
+
                     merged_rows.append({
                         **detail,
+                        "vin": row_vin,
                         "record_id": record_id,
                         "lot_no": lot_no or detail.get("lot_no"),
                         "auction_id": aid,

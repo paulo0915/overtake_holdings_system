@@ -1,11 +1,20 @@
 """Broad Arrow vehicle rows -> ``AUCTION_COLUMNS``."""
 
 import logging
+import re
 from typing import Any
 
 from shared.fx_converter import FXConverter
 
 logger = logging.getLogger(__name__)
+
+# Extract event slug from listing_url: "/vehicles/ve26_r0025/..." → "ve26"
+_EVENT_SLUG_RE = re.compile(r"/vehicles/([a-z0-9]+)_r\d+", re.IGNORECASE)
+
+
+def _event_slug(url: str) -> str | None:
+    m = _EVENT_SLUG_RE.search(url or "")
+    return m.group(1).lower() if m else None
 
 
 async def build_records(
@@ -15,6 +24,7 @@ async def build_records(
     scraped_at: str,
     *,
     mode: str = "past",
+    event_meta: dict[str, dict] | None = None,
 ) -> list[dict[str, Any]]:
     """``mode='past'`` = hammer-based rows; ``mode='upcoming'`` = estimate-based rows."""
     records: list[dict[str, Any]] = []
@@ -36,11 +46,20 @@ async def build_records(
                 skipped["filter"] += 1
                 continue
 
-        currency = (m.get("currency") or "USD").strip() or "USD"
-        selling_date = m.get("selling_date")
+        # Resolve event metadata (country, currency, date) from the cached lookup.
+        # Falls back to the JSON-LD currency if the event metadata is unavailable.
+        slug = _event_slug(m.get("listing_url") or "")
+        ev = (event_meta or {}).get(slug or "", {}) if slug else {}
+        country = ev.get("country") or None
+        currency = (
+            ev.get("currency")
+            or (m.get("currency") or "").strip()
+            or "USD"
+        )
+        selling_date = m.get("selling_date") or ev.get("date")
 
         if mode == "upcoming":
-            records.append(_build_upcoming_row(m, currency, selling_date, scraped_at))
+            records.append(_build_upcoming_row(m, currency, selling_date, scraped_at, country=country))
             continue
 
         hammer = m.get("hammer")
@@ -78,7 +97,7 @@ async def build_records(
                 "FX_rate_used": fx_rate,
                 "Selling_date": selling_date,
                 "Auction_house": "Broad Arrow",
-                "Country": "USA",
+                "Country": country,
                 "Image_url": m.get("image_url"),
                 "Listing_url": m.get("listing_url"),
                 "Source": "broadarrowauctions.com",
@@ -93,7 +112,7 @@ async def build_records(
     return records
 
 
-def _build_upcoming_row(m, currency, selling_date, scraped_at):
+def _build_upcoming_row(m, currency, selling_date, scraped_at, *, country=None):
     """Upcoming: empty Sold_status, no hammer/bid, estimate range is the signal."""
     has_est = m.get("estimate_low") is not None or m.get("estimate_high") is not None
     return {
@@ -120,7 +139,7 @@ def _build_upcoming_row(m, currency, selling_date, scraped_at):
         "FX_rate_used": None,
         "Selling_date": selling_date,
         "Auction_house": "Broad Arrow",
-        "Country": "USA",
+        "Country": country,
         "Image_url": m.get("image_url"),
         "Listing_url": m.get("listing_url"),
         "Source": "broadarrowauctions.com",

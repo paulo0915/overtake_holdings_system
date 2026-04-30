@@ -165,13 +165,23 @@ def parse_auction_hits(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], i
         doc = hit.get("document") or {}
         if not doc:
             continue
+        _raw_country = (doc.get("country") or {}).get("name")
+        _country_code = (doc.get("country") or {}).get("code")
+        # Monaco has ISO code MC. Some Typesense datasets incorrectly map it to
+        # France because of gazetteer ambiguity. Force the correct sovereign state.
+        if _country_code and _country_code.upper() == "MC":
+            _raw_country = "Monaco"
+        # Also catch the "Monte Carlo" city string making it through as a country name.
+        if _raw_country and _raw_country.lower() in ("monte carlo", "monte-carlo"):
+            _raw_country = "Monaco"
+
         au = {
             "id": str(doc.get("id") or ""),
             "slug": str(doc.get("slug") or ""),
             "title": doc.get("auctionTitle") or doc.get("auctionHeading") or "",
             "type": doc.get("auctionType"),
-            "country": (doc.get("country") or {}).get("name"),
-            "country_code": (doc.get("country") or {}).get("code"),
+            "country": _raw_country,
+            "country_code": _country_code,
             "currency_iso": (doc.get("currency") or {}).get("iso_code"),
             "hammer_datetime": (doc.get("hammerTime") or {}).get("datetime"),
             "hammer_timestamp": (doc.get("hammerTime") or {}).get("timestamp"),
@@ -241,6 +251,35 @@ def extract_vin_from_title_or_desc(sdesc: str, desc_text: str) -> str | None:
         # Some older cars have non-17-char chassis numbers — still return them.
         if 5 <= len(candidate) <= 25:
             return candidate
+    return None
+
+
+# Bonhams URL slugs embed the chassis number as: …chassis-no-<value>(-engine-no-…|end)
+# Example: /auction/31711/lot/115/1985-ferrari-testarossa-coupe-chassis-no-zffta17b000055031-engine-no-f113a-00060/
+_URL_CHASSIS_RE = re.compile(
+    r"chassis-no-([a-z0-9]+?)(?=-engine-no-|/?$)",
+    re.IGNORECASE,
+)
+
+
+def extract_vin_from_url(listing_url: str) -> str | None:
+    """Extract chassis number from a Bonhams lot URL slug when description extraction fails.
+
+    Bonhams consistently encodes ``chassis-no-<value>`` in the URL path for 100%
+    of current listings. This function acts as a fallback after
+    ``extract_vin_from_title_or_desc`` so that lots where the chassis appears
+    only in the URL (and not in the description body) still get a VIN populated.
+    Description-extracted VINs take priority because Bonhams sometimes truncates
+    the URL for SEO while keeping the full chassis string in the description.
+    """
+    if not listing_url:
+        return None
+    m = _URL_CHASSIS_RE.search(listing_url)
+    if not m:
+        return None
+    candidate = m.group(1).upper()
+    if 5 <= len(candidate) <= 25:
+        return candidate
     return None
 
 

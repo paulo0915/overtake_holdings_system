@@ -23,7 +23,8 @@ CITY_COUNTRY_MAP = {
     "geneva": "Switzerland", "zurich": "Switzerland",
     "munich": "Germany", "stuttgart": "Germany",
     "dubai": "UAE", "abu dhabi": "UAE",
-    "monaco": "Monaco",
+    "monaco": "Monaco", "monte carlo": "Monaco", "monte-carlo": "Monaco",
+    "cernobbio": "Italy", "villa d'este": "Italy",
     "milan": "Italy", "maranello": "Italy",
     "tokyo": "Japan", "sydney": "Australia", "toronto": "Canada",
 }
@@ -47,6 +48,10 @@ _COUNTRY_NAME_OVERRIDES = {
     "united arab emirates": "UAE",
     "u.a.e.": "UAE",
     "uae": "UAE",
+    # Monaco is a sovereign state, not France. Typesense / geocoding services
+    # sometimes return "Monte Carlo" or "France" for Monaco-based events.
+    "monte carlo": "Monaco",
+    "monte-carlo": "Monaco",
 }
 
 

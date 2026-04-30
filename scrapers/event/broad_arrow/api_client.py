@@ -64,6 +64,22 @@ async def fetch_event_html(client: httpx.AsyncClient, event_path: str) -> str:
 
 
 @retry(**_RETRY)
+async def fetch_event_meta_html(client: httpx.AsyncClient, slug: str) -> str:
+    """GET /events/event/{slug} — used to extract location/date metadata per event."""
+    url = f"{SITE_ORIGIN}/events/event/{slug}/"
+    resp = await client.get(
+        url,
+        headers=get_headers(
+            accept="text/html", referer=SITE_ORIGIN + PAST_AUCTIONS_PATH
+        ),
+        timeout=REQUEST_TIMEOUT,
+        follow_redirects=True,
+    )
+    resp.raise_for_status()
+    return resp.text
+
+
+@retry(**_RETRY)
 async def fetch_branch_results_html(
     client: httpx.AsyncClient, *, url: str, event_url: str
 ) -> str:
