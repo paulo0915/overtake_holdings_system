@@ -105,7 +105,7 @@ def parse_typesense_document(doc: dict[str, Any]) -> dict[str, Any]:
         "int_color": None,
         "engine_spec": _engine(doc.get("powertrainName"), feats.get("fuelType")),
         "transmission": normalize_transmission(feats.get("transmission")),
-        "lot_number": record_id or None,
+        "lot_number": None,  # CollectingCars is an online auction; numeric IDs are internal, not lot numbers
         "currency": _currency_iso(doc.get("currencyCode")),
         "amount_native": int(price) if price is not None else None,
         "selling_date": _selling_date(doc.get("dtSoldUTC")),

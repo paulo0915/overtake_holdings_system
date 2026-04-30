@@ -56,6 +56,7 @@ def build_record(
         "Image_url": fallback("image_url"),
         "Listing_url": flat.get("listing_url"),
         "Source": "usedcars.com",
+        "Listing_segment": "used",  # UsedCars.com is a used-only feed
         "Listing_description": detail.get("description"),
         "Scraped_at": scraped_at,
     }

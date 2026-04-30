@@ -12,6 +12,7 @@ def build_record(
     scraped_at: str,
     today_iso: str,
     source: str = "truecar.com",
+    listing_segment: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the full record for ``shared.db.upsert_classified_record``.
 
@@ -58,6 +59,7 @@ def build_record(
         "Image_url": flat.get("image_url"),
         "Listing_url": flat.get("listing_url"),
         "Source": source,
+        "Listing_segment": listing_segment,
         "Listing_description": detail.get("description"),
         "Scraped_at": scraped_at,
     }

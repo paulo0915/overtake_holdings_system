@@ -148,12 +148,19 @@ _CLASSIFIEDS_DOMAIN = {
 }
 
 
-def _store_classifieds(records: list[dict], source_code: str) -> None:
+def _store_classifieds(
+    records: list[dict],
+    source_code: str,
+    listing_segment: str | None = None,
+) -> None:
     """Upsert classifieds lifecycle (insert / update / skipped) + mark stale rows.
 
     Unlike auctions, every classified listing passes through a per-row helper
     that diffs the old price vs the new one, and we run a ``Removed`` sweep at
     the end for any Active row we didn't see this pass.
+
+    ``listing_segment`` (e.g. 'used' / 'new') scopes the Removed sweep so
+    a 'used' run doesn't flip the 'new' mode's rows to Removed.
     """
     from shared.db import mark_removed_classifieds, upsert_classified_record
 
@@ -180,7 +187,7 @@ def _store_classifieds(records: list[dict], source_code: str) -> None:
     domain = _CLASSIFIEDS_DOMAIN.get(source_code)
     if domain:
         try:
-            removed = mark_removed_classifieds(domain, seen_urls)
+            removed = mark_removed_classifieds(domain, seen_urls, listing_segment=listing_segment)
             if removed:
                 print(f"Marked {removed} prior listings as Removed")
         except Exception as e:
@@ -206,7 +213,11 @@ def main() -> None:
     )
     parser.add_argument("--max-concurrent", type=int, default=None, help="Override concurrency")
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
-    parser.add_argument("--use-filter", action="store_true", help="Apply vehicle filter from tracking file")
+    parser.add_argument(
+        "--no-filter", action="store_true",
+        help="Disable vehicle filter (filter runs by default; use this flag only for debugging)",
+    )
+    parser.add_argument("--use-filter", action="store_true", help="[DEPRECATED] Alias for backwards-compat; filter now runs by default")
     parser.add_argument(
         "--mode", type=str, default="past",
         choices=["past", "upcoming", "used", "new", "all"],
@@ -227,17 +238,21 @@ def main() -> None:
 
     from shared.config import MIN_PRICE_USD, MAX_CONCURRENT_REQUESTS, VEHICLE_FILTER_FILE
 
-    # Vehicle filter (optional)
+    # Vehicle filter runs by default; use --no-filter to disable (debugging only).
     vehicle_filter = None
-    if args.use_filter:
-        from shared.vehicle_filter import VehicleFilter
-        vehicle_filter = VehicleFilter(VEHICLE_FILTER_FILE)
-        logging.getLogger(__name__).info(f"Vehicle filter loaded from {VEHICLE_FILTER_FILE}")
+    if not args.no_filter:
+        try:
+            from shared.vehicle_filter import VehicleFilter
+            vehicle_filter = VehicleFilter(VEHICLE_FILTER_FILE)
+            logging.getLogger(__name__).info(f"Vehicle filter loaded from {VEHICLE_FILTER_FILE}")
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Vehicle filter could not be loaded ({e}); running without filter")
 
     min_price = args.min_price if args.min_price is not None else MIN_PRICE_USD
     max_concurrent = args.max_concurrent if args.max_concurrent is not None else MAX_CONCURRENT_REQUESTS
 
     records = []
+    listing_segment: str | None = None  # populated by mode-aware classifieds scrapers
 
     # ── Daily scrapers ─────────────────────────────────────────────────────────
     if args.source == "bat":
@@ -489,8 +504,7 @@ def main() -> None:
             mode=cg_mode,
         )
         records = asyncio.run(scraper.run())
-        # Scoped source tag for mark-removed (see cargurus/scraper.py comment).
-        _CLASSIFIEDS_DOMAIN["cg"] = f"cargurus.com/{cg_mode}"
+        listing_segment = cg_mode
 
     elif args.source == "tc":
         from scrapers.classifieds.truecar.scraper import TrueCarScraper
@@ -504,7 +518,7 @@ def main() -> None:
             mode=tc_mode,
         )
         records = asyncio.run(scraper.run())
-        _CLASSIFIEDS_DOMAIN["tc"] = f"truecar.com/{tc_mode}"
+        listing_segment = tc_mode
 
     elif args.source == "uc":
         from scrapers.classifieds.usedcars_com.scraper import UsedCarsComScraper
@@ -529,7 +543,7 @@ def main() -> None:
             mode=atca_mode,
         )
         records = asyncio.run(scraper.run())
-        _CLASSIFIEDS_DOMAIN["atca"] = f"autotrader.ca/{atca_mode}"
+        listing_segment = atca_mode
 
     elif args.source == "je":
         from scrapers.classifieds.jamesedition.scraper import JamesEditionScraper
@@ -554,19 +568,12 @@ def main() -> None:
             mode=atcom_mode,
         )
         records = asyncio.run(scraper.run())
-        # Match the source-tag logic in the scraper: bare ``autotrader.com``
-        # for the mixed feed, ``autotrader.com/<mode>`` only when the run
-        # is scoped to a specific listing type.
-        _CLASSIFIEDS_DOMAIN["atcom"] = (
-            "autotrader.com"
-            if atcom_mode == "all"
-            else f"autotrader.com/{atcom_mode}"
-        )
+        listing_segment = None if atcom_mode == "all" else atcom_mode
 
     # DB write is the default. Use --no-store-db to skip (e.g. for dry-run checks).
     if records and not args.no_store_db:
         if args.source in CLASSIFIEDS_SOURCES:
-            _store_classifieds(records, args.source)
+            _store_classifieds(records, args.source, listing_segment=listing_segment)
         else:
             from shared.db import insert_auction_records
             try:

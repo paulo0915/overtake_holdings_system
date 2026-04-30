@@ -37,15 +37,14 @@ async def build_records(
             continue
         seen_ids.add(item_id)
 
-        # Skip members-only previews — PCarMarket lists some cars twice,
-        # once on the public auction path and once as ``MP: <title>``
-        # (members-only preview) on ``/mp/…``. The MP duplicate has the
-        # same VIN as the public one, so keeping it would double-count
-        # every high-end listing. Per P1 §1.4.
+        # Strip the ``MP:`` members-preview prefix that PCarMarket prefixes to
+        # some titles.  These are real lots, not duplicates — strip the tag so
+        # the Title stored in the DB is clean.  True VIN-level duplicates are
+        # caught by the seen_ids set above.
         raw_title = (item.get("title") or "").strip()
-        if raw_title.startswith("MP:"):
-            skipped["dup"] += 1
-            continue
+        if raw_title.upper().startswith("MP:"):
+            raw_title = raw_title[3:].strip()
+            item = {**item, "title": raw_title}
 
         # Vehicle filter before any expensive parsing or FX calls
         if vehicle_filter and item.get("title"):

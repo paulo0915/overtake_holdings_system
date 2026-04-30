@@ -154,8 +154,14 @@ def parse_listing(listing: dict[str, Any]) -> dict[str, Any] | None:
         except (TypeError, ValueError):
             year = None
 
-    make = vehicle.get("make") or None
-    model_group = vehicle.get("modelGroup") or vehicle.get("model") or None
+    _UNSPECIFIED = frozenset({"unspecified", "unknown", "other", "n/a", "none"})
+
+    raw_make = vehicle.get("make")
+    make = raw_make if raw_make and str(raw_make).strip().lower() not in _UNSPECIFIED else None
+
+    raw_model = vehicle.get("modelGroup") or vehicle.get("model")
+    model_group = raw_model if raw_model and str(raw_model).strip().lower() not in _UNSPECIFIED else None
+
     trim = vehicle.get("modelVersionInput") or None
 
     transmission = normalize_transmission(vehicle.get("transmission"))
@@ -182,6 +188,11 @@ def parse_listing(listing: dict[str, Any]) -> dict[str, Any] | None:
 
     title = _compose_title(year, make, model_group, trim)
 
+    # Some dealers write "PRICE IN USD" in the title to declare that their
+    # listed price is in US dollars, not CAD.  Detect this and store the
+    # currency override so the record_builder can skip the CAD→USD conversion.
+    price_in_usd_override = bool(re.search(r'\bprice\s+in\s+usd\b', title or '', re.I))
+
     return {
         "record_id": f"atca_{listing_id}",
         "listing_id": listing_id,
@@ -197,6 +208,7 @@ def parse_listing(listing: dict[str, Any]) -> dict[str, Any] | None:
         "transmission": transmission,
         "dealer_name": dealer_name,
         "asking_price_cad": price,
+        "price_in_usd_override": price_in_usd_override,
         "country": country,
         "image_url": image_url,
         "listing_url": url,

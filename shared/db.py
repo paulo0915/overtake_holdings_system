@@ -193,22 +193,31 @@ def upsert_classified_record(record: dict) -> str:
     return "skipped"
 
 
-def mark_removed_classifieds(source: str, active_urls: set[str]) -> int:
+def mark_removed_classifieds(
+    source: str,
+    active_urls: set[str],
+    listing_segment: str | None = None,
+) -> int:
     """
     Batch-mark classifieds as 'Removed' if Active but not in current scrape.
 
-    Fetches all active IDs for the source, filters locally, then issues a
-    single batch update for removed ones.
+    Fetches all active IDs for the source (optionally further scoped to a
+    ``listing_segment`` such as 'used' or 'new' so that one mode's scrape
+    doesn't Removed-flip the other mode's rows), filters locally, then issues
+    a single batch update for removed ones.
     """
     client = get_client()
 
-    active_rows = (
+    query = (
         client.table("classifieds")
         .select("record_id, listing_url")
         .eq("source", source)
         .eq("listing_status", "Active")
-        .execute()
     )
+    if listing_segment:
+        query = query.eq("listing_segment", listing_segment)
+
+    active_rows = query.execute()
 
     to_remove = [
         row["record_id"] for row in active_rows.data

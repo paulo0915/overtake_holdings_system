@@ -13,13 +13,27 @@ def build_record(
     scraped_at: str,
     today_iso: str,
     source: str = "autotrader.ca",
+    listing_segment: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the full record for ``shared.db.upsert_classified_record``.
 
-    Prices are CAD-native; the caller does the CAD→USD conversion with the
-    shared ``FXConverter`` and passes the result in.
+    For most listings prices are CAD-native; the caller does the CAD→USD
+    conversion with the shared ``FXConverter`` and passes the result in.
+    When ``flat["price_in_usd_override"]`` is True the dealer declared "PRICE
+    IN USD" in their title; Currency is set to USD and FX rate is 1.0.
     """
-    price_cad = flat.get("asking_price_cad")
+    price = flat.get("asking_price_cad")
+    price_in_usd = flat.get("price_in_usd_override", False)
+
+    if price_in_usd:
+        currency = "USD"
+        # Price is already USD; no conversion needed.
+        effective_usd = float(price) if price is not None else None
+        effective_fx = 1.0
+    else:
+        currency = "CAD"
+        effective_usd = asking_price_usd
+        effective_fx = fx_rate
 
     return {
         "Record_ID": flat["record_id"],
@@ -27,8 +41,6 @@ def build_record(
         "Year": flat.get("year"),
         "Make": flat.get("make"),
         "Model": flat.get("model"),
-        # No VIN exposed in the feed; leave empty so the schema column remains
-        # honest rather than filled with the AutoScout24 UUID.
         "VIN": None,
         "Mileage_mi": flat.get("mileage_mi"),
         "Ext_color": flat.get("ext_color"),
@@ -36,10 +48,10 @@ def build_record(
         "Engine_spec": flat.get("engine_spec"),
         "Transmission": flat.get("transmission"),
         "Dealer_name": flat.get("dealer_name"),
-        "Asking_price": price_cad,
-        "Currency": "CAD",
-        "Asking_price_USD": asking_price_usd,
-        "FX_rate_used": fx_rate,
+        "Asking_price": price,
+        "Currency": currency,
+        "Asking_price_USD": effective_usd,
+        "FX_rate_used": effective_fx,
         "Listing_status": "Active",
         "First_seen_date": today_iso,
         "Last_seen_date": today_iso,
@@ -49,6 +61,7 @@ def build_record(
         "Image_url": flat.get("image_url"),
         "Listing_url": flat.get("listing_url"),
         "Source": source,
+        "Listing_segment": listing_segment,
         "Listing_description": flat.get("description"),
         "Scraped_at": scraped_at,
     }

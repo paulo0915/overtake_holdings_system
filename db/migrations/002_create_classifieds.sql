@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS classifieds (
     Image_url               TEXT,
     Listing_url             TEXT NOT NULL,
     Source                  TEXT NOT NULL,
+    Listing_segment         TEXT,
     Listing_description     TEXT,
     Scraped_at              TEXT NOT NULL
 );

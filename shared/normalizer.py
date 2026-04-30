@@ -1,9 +1,10 @@
 """Shared data normalization — mileage, transmission, engine, dates, country."""
 
+from __future__ import annotations
+
 import html as html_lib
 import re
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 import pycountry
 
@@ -225,6 +226,11 @@ def normalize_vin(raw: str | None) -> str | None:
             return None
 
     if _VIN_RE.match(s):
+        # WMI (first 3 chars) never starts with '0' in any real VIN.
+        # Zero-prefixed strings are internal inventory IDs from dealers /
+        # auction platforms (CarGurus, Cars.com, Barrett-Jackson, SBX Cars).
+        if s[0] == "0":
+            return None
         return s
     return None
 
@@ -287,14 +293,109 @@ def parse_year_from_title(title: str) -> int | None:
 
 _KNOWN_MAKES = [
     "Aston Martin", "Gordon Murray Automotive", "Mercedes-Benz", "Mercedes-AMG",
-    "Alfa Romeo", "Land Rover", "De Tomaso",
+    "Alfa Romeo", "Land Rover", "De Tomaso", "Rolls-Royce",
     "Ferrari", "Lamborghini", "Porsche", "Bugatti", "McLaren", "Pagani",
     "Koenigsegg", "BMW", "Audi", "Ford", "Honda", "Acura", "Lexus",
     "Nissan", "Toyota", "Chevrolet", "Dodge", "Shelby", "Lancia",
-    "Maserati", "Bentley", "Rolls-Royce", "Jaguar", "Lotus",
+    "Maserati", "Bentley", "Jaguar", "Lotus",
     "Pontiac", "Plymouth", "AMC", "Saleen", "SSC", "Rimac",
     "Hennessey", "W Motors", "Czinger", "Lucid", "Tesla",
+    "De Havilland", "Bristol Cars", "Pininfarina",
 ]
+
+# Sorted longest-first so multi-word makes match before their single-word prefix.
+_KNOWN_MAKES_SORTED = sorted(_KNOWN_MAKES, key=lambda m: len(m), reverse=True)
+
+# Canonical casing corrections keyed by lowercase variant.
+_MAKE_CASING = {
+    "mclaren": "McLaren",
+    "gmc": "GMC",
+    "bmw": "BMW",
+    "amg": "AMG",
+    "tvr": "TVR",
+    "mgb": "MGB",
+    "mg": "MG",
+    "bmw alpina": "BMW Alpina",
+}
+
+# Remap entries: (canonical_make, prepend_old_make_to_model).
+# prepend=True  → old make string is a model-line, not a brand (Range Rover).
+# prepend=False → old make is just a misspelling / missing hyphen (Rolls Royce).
+_MAKE_REMAP: dict[str, tuple[str, bool]] = {
+    "range rover": ("Land Rover", True),
+    "rolls royce": ("Rolls-Royce", False),
+    # "Mercedes" alone is the truncated brand; ensure -Benz is always appended.
+    "mercedes": ("Mercedes-Benz", False),
+    # "Mercedes Benz" (space, no hyphen) — normalise to canonical form.
+    "mercedes benz": ("Mercedes-Benz", False),
+}
+
+
+def normalize_make_model(
+    make: str | None,
+    model: str | None,
+    *,
+    title: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Fix multi-word make splits and canonical casing.
+
+    When a source returns Make="Aston" / Model="Martin DB4 …" (first-space
+    split bug), reconstruct from make+model and re-match against the known
+    multi-word makes list.  Also applies casing corrections (McLaren, GMC…)
+    and remaps pseudo-makes like "Range Rover" → "Land Rover".
+
+    Arguments:
+        make:  raw Make value from the source scraper.
+        model: raw Model value from the source scraper.
+        title: full listing title (optional) — used when make/model are both
+               None/empty to attempt title-based extraction as a last resort.
+    """
+    make_s = (make or "").strip()
+    model_s = (model or "").strip()
+
+    # ── Remap pseudo-makes / casing corrections ───────────────────────────────
+    remap_entry = _MAKE_REMAP.get(make_s.lower())
+    if remap_entry:
+        canonical, prepend = remap_entry
+        if prepend:
+            # "Range Rover" is a model line → prepend it to the model string
+            model_s = (f"{make_s} {model_s}").strip() if model_s else make_s
+        make_s = canonical
+        # When source splits "Mercedes-Benz 300SL" as Make="Mercedes"/Model="Benz 300SL"
+        # the model will now incorrectly start with "Benz". Strip it.
+        if make_s == "Mercedes-Benz" and model_s.lower().startswith("benz "):
+            model_s = model_s[5:].strip()
+
+    # ── Longest-match re-split for multi-word makes ───────────────────────────
+    combined = f"{make_s} {model_s}".strip() if model_s else make_s
+    for known in _KNOWN_MAKES_SORTED:
+        if combined.lower().startswith(known.lower()):
+            remainder = combined[len(known):].strip()
+            make_s = known
+            model_s = remainder
+            break
+
+    # ── Casing corrections ────────────────────────────────────────────────────
+    cased = _MAKE_CASING.get(make_s.lower())
+    if cased:
+        make_s = cased
+
+    # ── Null-out placeholder strings ──────────────────────────────────────────
+    _PLACEHOLDER = frozenset({"unspecified", "unknown", "other", "n/a", "none", ""})
+    if make_s.lower() in _PLACEHOLDER:
+        make_s = ""
+    if model_s.lower() in _PLACEHOLDER:
+        model_s = ""
+
+    # ── Title fallback when make is still empty ───────────────────────────────
+    if not make_s and title:
+        inferred_make, inferred_model = parse_make_model_from_title(title)
+        if inferred_make:
+            make_s = inferred_make
+            if not model_s:
+                model_s = inferred_model
+
+    return (make_s or None, model_s or None)
 
 
 def parse_make_model_from_title(title: str) -> tuple[str, str]:
@@ -334,12 +435,12 @@ def format_selling_date(timestamp: int | None, date_str: str | None) -> str | No
     return None
 
 
-_PT = ZoneInfo("America/Los_Angeles")
-
-
 def get_scraped_at() -> str:
-    """Return current Pacific Time timestamp in ISO 8601 format."""
-    return datetime.now(_PT).strftime("%Y-%m-%dT%H:%M:%S%z")
+    """Return current UTC timestamp in ISO 8601 format (Z suffix).
+
+    Brief spec: Scraped_at must be UTC ending with 'Z' (e.g. 2026-04-22T23:29:05Z).
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ── Description field extraction (shared by all scrapers) ───────────────────

@@ -60,6 +60,7 @@ CLASSIFIEDS_COLUMNS = [
     "Image_url",
     "Listing_url",
     "Source",
+    "Listing_segment",
     "Listing_description",
     "Scraped_at",
 ]

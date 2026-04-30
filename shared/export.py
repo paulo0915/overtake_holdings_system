@@ -11,6 +11,10 @@ logger = logging.getLogger(__name__)
 def export_to_csv(records: list[dict], output_path: str | Path, columns: list[str]) -> Path:
     """Export records to CSV with exact column order.
 
+    Also writes a ``data_dictionary.csv`` alongside the main CSV (same
+    directory, stem + ``_data_dictionary``), satisfying Deliverable #7 of the
+    brief which requires a Data Dictionary for Claude/AI compatibility.
+
     Encoding is plain ``utf-8`` (no BOM). ``utf-8-sig`` adds an ``EF BB BF``
     prefix that Excel-for-Windows likes, but many consumers — Python's
     stdlib ``csv.DictReader`` without ``utf-8-sig``, ``awk``/``grep``
@@ -23,6 +27,12 @@ def export_to_csv(records: list[dict], output_path: str | Path, columns: list[st
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False, encoding="utf-8")
     logger.info(f"Exported {len(df)} records to {path}")
+
+    # Write accompanying data_dictionary.csv (Deliverable #7)
+    dict_path = path.parent / (path.stem + "_data_dictionary.csv")
+    _write_data_dictionary_csv(dict_path, columns)
+    logger.info(f"Exported data dictionary to {dict_path}")
+
     return path
 
 
@@ -54,8 +64,10 @@ def enrich_records(records: list[dict]) -> list[dict]:
     from .normalizer import (
         canonical_country_name,
         normalize_engine_spec,
+        normalize_make_model,
         normalize_transmission,
         normalize_vin,
+        parse_year_from_title,
     )
 
     for r in records:
@@ -64,21 +76,32 @@ def enrich_records(records: list[dict]) -> list[dict]:
         tx = r.get("Transmission")
         if tx not in (None, "Manual", "Automatic"):
             r["Transmission"] = normalize_transmission(tx)
-        # Canonicalise ``Country`` so ``United Kingdom`` / ``UK`` /
-        # ``United States`` / ``USA`` don't co-exist in the same column.
         if r.get("Country"):
             r["Country"] = canonical_country_name(r["Country"])
-        # Run ``Engine_spec`` through the normalizer so junk values like
-        # ``"0"``, ``"V8"``, or bare displacement numbers (``"427"``) don't
-        # leak into the DB.
         if r.get("Engine_spec"):
             r["Engine_spec"] = normalize_engine_spec(r["Engine_spec"])
-        # Reject placeholder / chassis-number / concat-bug VINs so the
-        # ``VIN`` column only contains decodable 17-char VINs. Per the
-        # P1 deep-dive, ~218 rows had things like ``.``, ``001``, ``DK28``,
-        # ``<vin>ENGINENO<engineno>`` stored under VIN.
         if "VIN" in r:
             r["VIN"] = normalize_vin(r.get("VIN"))
+
+        # Fix multi-word make splits (Aston Martin, Land Rover, Alfa Romeo…),
+        # canonical casing (McLaren, GMC), and pseudo-make remaps (Range Rover).
+        # Also nulls "Unspecified" / placeholder make/model strings.
+        make, model = normalize_make_model(
+            r.get("Make"), r.get("Model"), title=r.get("Title")
+        )
+        r["Make"] = make
+        r["Model"] = model
+
+        # Year: if the stored Year disagrees with the 4-digit year at the start
+        # of the Title, the Title is treated as authoritative (brief §5 / client
+        # Issues Report Section 5).  Only override when the title contains a
+        # leading year and the current Year value is wrong.
+        title = r.get("Title") or ""
+        if title:
+            title_year = parse_year_from_title(title)
+            if title_year and r.get("Year") != title_year:
+                r["Year"] = title_year
+
     return records
 
 
@@ -141,7 +164,8 @@ _COLUMN_DESCRIPTIONS = {
     "Listing_url": "Full listing page URL.",
     "Source": "Scrape source domain.",
     "Listing_description": "Full listing description body text.",
-    "Scraped_at": "Timestamp in Pacific Time (ISO 8601).",
+    "Listing_segment": "Inventory segment tag: 'used', 'new', or 'all'. Separate from Source domain.",
+    "Scraped_at": "Timestamp when the record was scraped. ISO 8601 UTC, e.g. 2026-04-22T23:29:05Z.",
     # Classifieds-specific
     "Dealer_name": "Selling dealer or seller name.",
     "Asking_price": "Listed asking price in original currency.",
@@ -163,3 +187,12 @@ def _write_data_dictionary(writer: pd.ExcelWriter, columns: list[str]) -> None:
             "Description": _COLUMN_DESCRIPTIONS.get(col, ""),
         })
     pd.DataFrame(rows).to_excel(writer, sheet_name="Data Dictionary", index=False)
+
+
+def _write_data_dictionary_csv(path: Path, columns: list[str]) -> None:
+    """Write a standalone data_dictionary.csv alongside a CSV export."""
+    rows = [
+        {"Column": col, "Description": _COLUMN_DESCRIPTIONS.get(col, "")}
+        for col in columns
+    ]
+    pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8")

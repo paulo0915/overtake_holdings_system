@@ -145,7 +145,8 @@ def main() -> None:
 
     tables = list(_TABLES) if args.table == "both" else [args.table]
     out = Path(args.out)
-    stamp = datetime.utcnow().strftime("%Y-%m-%d")
+    from datetime import timezone as _tz
+    stamp = datetime.now(_tz.utc).strftime("%Y-%m-%d")
 
     # If ``--out`` points at a .csv file AND a single table was chosen,
     # honour that exact path. Otherwise treat it as a directory and

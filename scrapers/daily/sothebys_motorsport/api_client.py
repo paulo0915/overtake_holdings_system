@@ -218,7 +218,11 @@ async def fetch_listings_page(
     sort: str,
     merge_live_and_upcoming: bool = MERGE_LIVE_AND_UPCOMING,
 ) -> dict[str, Any]:
-    """One page of ``/api/auctions/listings`` (JSON)."""
+    """One page of ``/api/auctions/listings`` (JSON).
+
+    The endpoint occasionally returns HTTP 400 with a valid JSON body that still
+    contains ``data.auctions``. We accept that payload instead of failing hard.
+    """
     params = {
         "page": str(page_num),
         "limit": str(limit),
@@ -232,9 +236,27 @@ async def fetch_listings_page(
         headers=default_headers(),
         timeout=_TIMEOUT,
     )
+    try:
+        payload = r.json()
+    except Exception:
+        payload = None
+
+    # Observed in production: 400 but usable data.auctions in response body.
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict) and isinstance(data.get("auctions"), list):
+            if r.status_code != 200:
+                logger.warning(
+                    "Listings returned HTTP %s but JSON contains auctions; continuing.",
+                    r.status_code,
+                )
+            return payload
+
     if r.status_code != 200:
         raise SothebysApiError(f"listings HTTP {r.status_code}: {r.text[:400]}")
-    return r.json()
+    if not isinstance(payload, dict):
+        raise SothebysApiError("listings response was not valid JSON object")
+    return payload
 
 
 # ---------------------------------------------------------------------------

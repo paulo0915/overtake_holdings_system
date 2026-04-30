@@ -36,28 +36,25 @@ async def build_records(
                 continue
 
         sold = bool(m.get("sold"))
-        price = m.get("price")          # int USD or None
+        price = m.get("price")          # int USD or None (undisclosed when None)
         currency = (m.get("currency") or "USD").strip() or "USD"
 
-        # Sold-only rows. Worldwide sometimes flags a lot as sold without
-        # disclosing the hammer — we drop those rather than persist a
-        # ``Sold`` row with no price (same policy as RM Sotheby's sealed sales).
+        # Keep sold lots even when hammer is undisclosed (empty Selling_price),
+        # because this source explicitly exposes "SOLD" without always exposing price.
         if not sold:
             skipped.setdefault("unsold", 0)
             skipped["unsold"] += 1
-            continue
-        if price is None:
-            skipped.setdefault("sold_no_price", 0)
-            skipped["sold_no_price"] += 1
             continue
 
         sold_status = "Sold"
         selling_price = price
         selling_date = m.get("selling_date")
 
-        selling_price_usd, fx_rate = await fx_converter.convert_to_usd(
-            selling_price, currency, selling_date,
-        )
+        selling_price_usd = fx_rate = None
+        if selling_price is not None:
+            selling_price_usd, fx_rate = await fx_converter.convert_to_usd(
+                selling_price, currency, selling_date,
+            )
 
         event = (m.get("auction_event") or "").strip()
 

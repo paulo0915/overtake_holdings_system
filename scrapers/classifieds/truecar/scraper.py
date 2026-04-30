@@ -182,7 +182,6 @@ class TrueCarScraper(BaseScraper):
             # --- Step 3: build records ----------------------------------------
             scraped_at = get_scraped_at()
             today_iso = datetime.now(tz=timezone.utc).date().isoformat()
-            source_tag = f"truecar.com/{self.mode}"
             records: list[dict] = []
             for flat in flat_rows:
                 rec = record_builder.build_record(
@@ -190,7 +189,8 @@ class TrueCarScraper(BaseScraper):
                     detail=details.get(flat["record_id"]),
                     scraped_at=scraped_at,
                     today_iso=today_iso,
-                    source=source_tag,
+                    source="truecar.com",
+                    listing_segment=self.mode,
                 )
                 records.append(rec)
 

@@ -163,7 +163,6 @@ class CarGurusScraper(BaseScraper):
             # Scope ``Source`` by mode so the mark-removed sweep only flips
             # rows for the exact mode we just scraped — used + new are
             # disjoint inventories and shouldn't Removed-flip each other.
-            source_tag = f"cargurus.com/{self.mode}"
             records: list[dict] = []
             for flat in flat_rows:
                 rec = record_builder.build_record(
@@ -171,7 +170,8 @@ class CarGurusScraper(BaseScraper):
                     detail=details.get(flat["record_id"]),
                     scraped_at=scraped_at,
                     today_iso=today_iso,
-                    source=source_tag,
+                    source="cargurus.com",
+                    listing_segment=self.mode,
                 )
                 records.append(rec)
 

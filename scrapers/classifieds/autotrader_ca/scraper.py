@@ -176,18 +176,23 @@ class AutoTraderCaScraper(BaseScraper):
 
             # --- Step 2: build records (no detail fetch needed) --------------
             scraped_at = get_scraped_at()
-            source_tag = f"autotrader.ca/{self.mode}"
             records: list[dict] = []
             for flat in flat_rows:
                 price_cad = flat.get("asking_price_cad")
-                price_usd, rate = await fx.convert_to_usd(price_cad, "CAD", today_iso)
+                if flat.get("price_in_usd_override"):
+                    # Dealer declared "PRICE IN USD" — skip CAD→USD conversion.
+                    price_usd = float(price_cad) if price_cad is not None else None
+                    rate = 1.0
+                else:
+                    price_usd, rate = await fx.convert_to_usd(price_cad, "CAD", today_iso)
                 rec = record_builder.build_record(
                     flat=flat,
                     asking_price_usd=price_usd,
                     fx_rate=rate,
                     scraped_at=scraped_at,
                     today_iso=today_iso,
-                    source=source_tag,
+                    source="autotrader.ca",
+                    listing_segment=self.mode,
                 )
                 records.append(rec)
 
