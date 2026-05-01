@@ -47,6 +47,7 @@ Usage:
     # je: --max-pages = SRP pages (30 listings each); USD floor; mixed new+used inventory
     python scripts/run_scraper.py --source je --max-pages 2 --min-price 200000
     # atcom: --mode used|new|all (default all); --max-pages = REST pages (25 listings each)
+    # as24: --mode used|new|all (default all); --max-pages = Next.js list pages (~17 listings each)
     #         OPENS A BROWSER WINDOW briefly to prime Akamai cookies.
     #         Requires residential IP — datacenter IPs are blocked regardless of cookies.
     python scripts/run_scraper.py --source atcom --mode all --max-pages 2 --min-price 100000
@@ -130,9 +131,10 @@ AVAILABLE_SOURCES = [
     "atca",  # classifieds — AutoTrader.ca (autotrader.ca); use --mode used|new
     "je",  # classifieds — JamesEdition (jamesedition.com); mixed new+used
     "atcom",  # classifieds — AutoTrader.com (autotrader.com); --mode used|new|all
+    "as24",  # classifieds — AutoScout24 (autoscout24.com); --mode used|new|all
 ]
 
-CLASSIFIEDS_SOURCES = {"dpr", "cars", "cg", "tc", "uc", "atca", "je", "atcom"}  # kept separate so main() picks the classifieds DB path
+CLASSIFIEDS_SOURCES = {"dpr", "cars", "cg", "tc", "uc", "atca", "je", "atcom", "as24"}
 
 # Map CLI source code → the ``source`` column value we store in Supabase. Used
 # by the mark-removed step so it only flips rows for the scraper that just ran.
@@ -145,6 +147,7 @@ _CLASSIFIEDS_DOMAIN = {
     "atca": "autotrader.ca",
     "je": "jamesedition.com",
     "atcom": "autotrader.com",
+    "as24": "autoscout24.com",
 }
 
 
@@ -224,7 +227,7 @@ def main() -> None:
         help=(
             "Mode selector. Event-auction scrapers accept 'past'/'upcoming' "
             "(default 'past'). CarGurus / TrueCar / AutoTrader.ca accept "
-            "'used'/'new'. AutoTrader.com accepts 'used'/'new'/'all'."
+            "'used'/'new'. AutoTrader.com and AutoScout24 accept 'used'/'new'/'all'."
         ),
     )
     parser.add_argument(
@@ -569,6 +572,20 @@ def main() -> None:
         )
         records = asyncio.run(scraper.run())
         listing_segment = None if atcom_mode == "all" else atcom_mode
+
+    elif args.source == "as24":
+        from scrapers.classifieds.autoscout24.scraper import AutoScout24Scraper
+        as24_mode = args.mode if args.mode in ("used", "new", "all") else "all"
+        scraper = AutoScout24Scraper(
+            min_price=min_price,
+            output_dir=args.output_dir,
+            max_concurrent=max_concurrent,
+            max_pages=args.max_pages,
+            vehicle_filter=vehicle_filter,
+            mode=as24_mode,
+        )
+        records = asyncio.run(scraper.run())
+        listing_segment = None if as24_mode == "all" else as24_mode
 
     # DB write is the default. Use --no-store-db to skip (e.g. for dry-run checks).
     if records and not args.no_store_db:

@@ -77,6 +77,7 @@ _CLASSIFIEDS_SOURCES = [
     ("cg",          ["used", "new"],"CarGurus"),
     ("tc",          ["used", "new"],"TrueCar"),
     ("atca",        ["used", "new"],"AutoTrader.ca"),
+    ("as24",        ["used", "new", "all"], "AutoScout24"),
 ]
 
 
