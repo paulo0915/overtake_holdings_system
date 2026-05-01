@@ -6,7 +6,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from shared.config import MAX_PRICE_USD
 from shared.fx_converter import FXConverter
 
 logger = logging.getLogger(__name__)
@@ -40,15 +39,6 @@ async def build_record(
     price_usd, fx_rate = (None, None)
     if price is not None:
         price_usd, fx_rate = await fx.convert_to_usd(float(price), currency, today_iso)
-
-    if price_usd is not None and price_usd > MAX_PRICE_USD:
-        logger.warning(
-            "autoscout24 converted USD %.0f exceeds MAX_PRICE_USD=%s — nulling (%s)",
-            price_usd, MAX_PRICE_USD, (flat.get("listing_url") or "")[:80],
-        )
-        price_usd = None
-        price = None
-        fx_rate = None
 
     year = pick("year")
     mileage_mi = pick("mileage_mi")
