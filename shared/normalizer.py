@@ -582,21 +582,20 @@ _COLOR_STOP_WORDS = (
 )
 
 _DESC_EXT_COLOR_PATTERNS = [
-    # Pattern A: lookahead stops capture at prepositions/descriptors.
-    # Uses {0,1} (not {0,2}) so greedy match cannot swallow a word that then
-    # satisfies the lookahead via a word further downstream.
+    # Pattern A: lookahead stops at prepositions/descriptors — allow up to 2
+    # extra words so "Striking Dark Green" / "Pearl Metallic White" are captured.
     re.compile(
-        r'(?:finished|painted|wrapped)\s+in\s+([A-Z][A-Za-z]+(?:[\s-]+[A-Za-z]+){0,1})'
+        r'(?:finished|painted|wrapped)\s+in\s+([A-Z][A-Za-z]+(?:[\s-]+[A-Za-z]+){0,2})'
         r'(?=\s+(?:' + _COLOR_STOP_WORDS + r'))',
         re.IGNORECASE,
     ),
-    # Pattern B: no lookahead fallback — at most 1 additional word.
+    # Pattern B: no lookahead fallback — at most 2 additional words.
     re.compile(
-        r'(?:finished|painted|wrapped)\s+in\s+([A-Z][A-Za-z]+(?:[\s-]+[A-Za-z]+){0,1})',
+        r'(?:finished|painted|wrapped)\s+in\s+([A-Z][A-Za-z]+(?:[\s-]+[A-Za-z]+){0,2})',
         re.IGNORECASE,
     ),
     re.compile(
-        r'(?:exterior\s+is|exterior\s+color\s*(?:is)?)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,1})',
+        r'(?:exterior\s+is|exterior\s+color\s*(?:is)?)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})',
         re.IGNORECASE,
     ),
 ]

@@ -67,14 +67,10 @@ async def build_records(
                 "Model": m.get("model"),
                 "VIN": m.get("vin"),
                 "Mileage_mi": m.get("mileage_mi"),
-                # Worldwide's /car-search/ POST returns a flat card payload with
-                # no structured colour / engine / transmission fields and no
-                # per-lot detail page. These columns are unavoidably null until
-                # the source exposes more data.
-                "Ext_color": None,
-                "Int_color": None,
-                "Engine_spec": None,
-                "Transmission": None,
+                "Ext_color": m.get("ext_color"),
+                "Int_color": m.get("int_color"),
+                "Engine_spec": m.get("engine_spec"),
+                "Transmission": m.get("transmission"),
                 "Lot_number": m.get("lot"),
                 "Estimate_low": None,
                 "Estimate_high": None,

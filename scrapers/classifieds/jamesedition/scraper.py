@@ -31,7 +31,7 @@ from shared.normalizer import get_scraped_at
 from shared.schemas import CLASSIFIEDS_COLUMNS
 
 from . import record_builder
-from .api_client import fetch_detail_html, fetch_list_page, new_session
+from .api_client import JESession
 from .config import DEFAULT_PAGE_SIZE, HARD_PAGE_CAP
 from .listing_parser import iter_listings, parse_detail_html, parse_list_tile
 
@@ -56,14 +56,14 @@ class JamesEditionScraper(BaseScraper):
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        async with new_session() as session:
+        async with JESession() as session:
             # --- Step 1: paginate SRP ---------------------------------------
             flat_rows: list[dict] = []
             page = 0
             while True:
                 page += 1
                 try:
-                    html = await fetch_list_page(session, page=page)
+                    html = await session.fetch_list_page(page=page)
                 except Exception as e:
                     logger.error("SRP page %s failed: %s", page, e)
                     break
@@ -113,32 +113,22 @@ class JamesEditionScraper(BaseScraper):
             logger.info("Collected %s listings - fetching details", len(flat_rows))
 
             # --- Step 2: detail fetches -------------------------------------
-            # Keep concurrency low (3 max) — Cloudflare flagged us at 4-5+.
-            detail_conc = max(1, min(self.max_concurrent, 3))
-            sem = asyncio.Semaphore(detail_conc)
+            # Playwright session is single-tab — fetch details sequentially
+            # to avoid race conditions on the shared page object.
             details: dict[str, dict] = {}
-            done = 0
             total = len(flat_rows)
-
-            async def one(flat: dict) -> None:
-                nonlocal done
+            for idx, flat in enumerate(flat_rows, 1):
                 key = flat["record_id"]
-                async with sem:
-                    try:
-                        raw = await fetch_detail_html(session, url=flat["listing_url"])
-                        parsed = parse_detail_html(raw) if raw else {}
-                    except Exception as e:
-                        logger.debug("detail %s failed: %s", key, e)
-                        parsed = {}
-                    details[key] = parsed
-                    done += 1
-                    if done % 20 == 0 or done == total:
-                        logger.info("Detail fetch %s/%s", done, total)
-                # Pause between detail fetches (even per-semaphore-slot) —
-                # 1-1.5 s is enough to avoid Cloudflare throttling.
-                await asyncio.sleep(REQUEST_DELAY_SECONDS * 0.8 + random.uniform(0.4, 0.8))
-
-            await asyncio.gather(*(one(r) for r in flat_rows))
+                try:
+                    raw = await session.fetch_detail_html(url=flat["listing_url"])
+                    parsed = parse_detail_html(raw) if raw else {}
+                except Exception as e:
+                    logger.debug("detail %s failed: %s", key, e)
+                    parsed = {}
+                details[key] = parsed
+                if idx % 20 == 0 or idx == total:
+                    logger.info("Detail fetch %s/%s", idx, total)
+                await asyncio.sleep(REQUEST_DELAY_SECONDS * 0.5 + random.uniform(0.2, 0.5))
 
             # --- Step 3: build records --------------------------------------
             scraped_at = get_scraped_at()

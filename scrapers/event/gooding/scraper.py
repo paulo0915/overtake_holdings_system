@@ -29,12 +29,14 @@ from . import record_builder
 from .api_client import (
     fetch_app_js,
     fetch_home_html,
+    fetch_lots_page_data,
     fetch_page_data,
     find_app_js_path,
 )
 from .listing_parser import (
     extract_paths_from_app_js,
     parse_lot_page_data,
+    parse_lot_paths_from_lots_page,
     select_lot_paths,
 )
 
@@ -63,18 +65,40 @@ class GoodingScraper(BaseScraper):
 
         async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT) as client:
 
-            # --- Step 1: discover app.js bundle + extract lot paths -----------
+            # --- Step 1: discover lot paths via app.js + lots page-data -------
             home_html = await fetch_home_html(client)
             app_js = find_app_js_path(home_html)
-            if not app_js:
-                logger.error("Could not find /app-*.js in homepage")
-                return []
-            logger.info("App bundle: %s", app_js)
+            lot_paths: list[str] = []
 
-            js_text = await fetch_app_js(client, app_js)
-            entries = extract_paths_from_app_js(js_text)
-            lot_paths = select_lot_paths(entries)
-            logger.info("Discovered %s lot paths in app bundle", len(lot_paths))
+            if app_js:
+                logger.info("App bundle: %s", app_js)
+                js_text = await fetch_app_js(client, app_js)
+                entries = extract_paths_from_app_js(js_text)
+                lot_paths = select_lot_paths(entries)
+                logger.info("Discovered %s lot paths from app.js bundle", len(lot_paths))
+            else:
+                logger.warning("Could not find /app-*.js in homepage — skipping bundle discovery")
+
+            # Secondary: /page-data/lots/page-data.json (Gatsby catalog index).
+            # Merge any paths not already found via app.js.
+            lots_payload = await fetch_lots_page_data(client)
+            fallback_paths = parse_lot_paths_from_lots_page(lots_payload)
+            if fallback_paths:
+                existing = set(lot_paths)
+                new_from_catalog = [p for p in fallback_paths if p not in existing]
+                lot_paths.extend(new_from_catalog)
+                logger.info(
+                    "lots page-data: %s paths (%s new not in bundle)",
+                    len(fallback_paths), len(new_from_catalog),
+                )
+            else:
+                logger.debug("lots page-data returned no paths")
+
+            if not lot_paths:
+                logger.error("No lot paths discovered from any source — aborting")
+                return []
+
+            logger.info("Total unique lot paths to scrape: %s", len(lot_paths))
 
             if max_lots > 0:
                 lot_paths = lot_paths[:max_lots]

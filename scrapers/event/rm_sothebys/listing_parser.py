@@ -9,6 +9,8 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
+from shared.normalizer import extract_description_fields, normalize_transmission
+
 from .config import SITE_ORIGIN
 
 # Only match the lots-index URL ``/auctions/{slug}/lots/`` — NOT deep lot URLs
@@ -285,10 +287,16 @@ def parse_value_fields(
     }
 
 
-def parse_lot_detail_html(html: str) -> dict[str, Any]:
-    """Parse ``idlabel`` / ``iddata`` blocks + ``og:title`` from a lot detail page."""
-    soup = BeautifulSoup(html, "html.parser")
+def _extract_spec_pairs(soup: BeautifulSoup) -> dict[str, str]:
+    """Extract label→value pairs from RM Sotheby's lot spec panel.
+
+    RM has changed their HTML structure across site redesigns. We try several
+    selector strategies in priority order and merge the results so that any
+    one matching strategy produces a full pair set.
+    """
     pairs: dict[str, str] = {}
+
+    # Strategy 1 (legacy): div.idlabel / div.iddata inside a col-lg parent.
     for lbl in soup.select("div.idlabel"):
         label = lbl.get_text(" ", strip=True)
         parent = lbl.find_parent("div", class_=lambda c: c and "col-lg" in str(c))
@@ -297,28 +305,103 @@ def parse_lot_detail_html(html: str) -> dict[str, Any]:
         data_el = parent.select_one("div.iddata")
         if not data_el:
             continue
-        val = data_el.get_text(" ", strip=True)
-        val = re.sub(r"^\|\s*", "", val).strip()
+        val = re.sub(r"^\|\s*", "", data_el.get_text(" ", strip=True)).strip()
         if label and val and label not in pairs:
             pairs[label] = val
 
-    vin = pairs.get("VIN") or pairs.get("Chassis No.") or pairs.get("Chassis Number")
-    mileage = pairs.get("Mileage") or pairs.get("Odometer") or pairs.get("Indicated Mileage")
-    ext = pairs.get("Exterior Color") or pairs.get("Colour") or pairs.get("Color")
-    intc = pairs.get("Interior Color") or pairs.get("Interior")
-    # RM exposes ``Engine No.`` (serial) as a labeled field — not a true engine spec.
-    # Only populate Engine_spec when an actual spec label (rare) is present.
-    engine = pairs.get("Engine")
-    trans = pairs.get("Transmission")
+    # Strategy 2 (current redesign): lot-specs__label / lot-specs__value sibling divs.
+    for lbl in soup.select("[class*='lot-specs__label'], [class*='lotSpecs__label'], [class*='spec-label']"):
+        label = lbl.get_text(" ", strip=True)
+        val_el = lbl.find_next_sibling() or lbl.parent.find_next_sibling()
+        if val_el:
+            val = val_el.get_text(" ", strip=True)
+            if label and val and label not in pairs:
+                pairs[label] = val
+
+    # Strategy 3: generic <dt>/<dd> or <th>/<td> spec tables anywhere on the page.
+    for dt in soup.select("dt"):
+        label = dt.get_text(" ", strip=True)
+        dd = dt.find_next_sibling("dd")
+        if dd:
+            val = dd.get_text(" ", strip=True)
+            if label and val and label not in pairs:
+                pairs[label] = val
+    for row in soup.select("tr"):
+        cells = row.find_all(["th", "td"])
+        if len(cells) == 2:
+            label = cells[0].get_text(" ", strip=True)
+            val = cells[1].get_text(" ", strip=True)
+            if label and val and label not in pairs:
+                pairs[label] = val
+
+    # Strategy 4: any element whose class contains "spec" paired with next sibling.
+    if not pairs:
+        for el in soup.find_all(class_=re.compile(r"spec", re.I)):
+            label = el.get_text(" ", strip=True)
+            sibling = el.find_next_sibling()
+            if sibling and label:
+                val = sibling.get_text(" ", strip=True)
+                if val and label not in pairs:
+                    pairs[label] = val
+
+    return pairs
+
+
+def parse_lot_detail_html(html: str) -> dict[str, Any]:
+    """Parse spec panels + og:title from a lot detail page.
+
+    Tries multiple CSS selector strategies to handle RM Sotheby's HTML across
+    different site redesigns. Falls back to description-text extraction for any
+    field still null after the structured parse.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    pairs = _extract_spec_pairs(soup)
+
+    vin = (
+        pairs.get("VIN") or pairs.get("Chassis No.") or pairs.get("Chassis No")
+        or pairs.get("Chassis Number") or pairs.get("Chassis")
+        or pairs.get("Serial No.") or pairs.get("Serial Number")
+    )
+    mileage = (
+        pairs.get("Mileage") or pairs.get("Odometer") or pairs.get("Indicated Mileage")
+        or pairs.get("Miles") or pairs.get("Kilometers")
+    )
+    ext = (
+        pairs.get("Exterior Color") or pairs.get("Exterior Colour")
+        or pairs.get("Exterior") or pairs.get("Colour") or pairs.get("Color")
+        or pairs.get("Paint") or pairs.get("Body Color")
+    )
+    intc = (
+        pairs.get("Interior Color") or pairs.get("Interior Colour")
+        or pairs.get("Interior") or pairs.get("Upholstery") or pairs.get("Trim")
+    )
+    engine = pairs.get("Engine") or pairs.get("Engine Spec") or pairs.get("Engine No.")
+    trans = pairs.get("Transmission") or pairs.get("Gearbox")
     location = pairs.get("Location")
 
     og = soup.find("meta", attrs={"property": "og:title"})
     og_title = og.get("content") if og and og.get("content") else None
 
-    desc_el = soup.select_one("section.lotdescription") or soup.select_one(
-        'section[class*="lotdescription"]',
+    desc_el = (
+        soup.select_one("section.lotdescription")
+        or soup.select_one('section[class*="lotdescription"]')
+        or soup.select_one('[class*="lot-description"]')
+        or soup.select_one('[class*="lotDescription"]')
     )
     description = desc_el.get_text(" ", strip=True) if desc_el else None
+
+    # Description-text fallback: if spec panel returned nothing useful, mine
+    # the description prose using the shared extractor.
+    if description and not all([ext, intc, engine, trans]):
+        desc_fields = extract_description_fields(description)
+        ext = ext or desc_fields.get("ext_color")
+        intc = intc or desc_fields.get("int_color")
+        engine = engine or desc_fields.get("engine")
+        if not trans and desc_fields.get("transmission"):
+            trans = desc_fields["transmission"]
+
+    if trans:
+        trans = normalize_transmission(trans) or trans
 
     img = soup.find("meta", attrs={"property": "og:image"})
     image_url = None

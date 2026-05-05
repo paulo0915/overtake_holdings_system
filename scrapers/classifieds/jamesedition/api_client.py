@@ -1,25 +1,23 @@
-"""HTTP helpers for JamesEdition (curl_cffi Chrome impersonation)."""
+"""HTTP helpers for JamesEdition — curl_cffi with residential proxy rotation.
+
+Cloudflare's managed challenge blocks direct requests and headless browsers, but
+passes residential proxy IPs cleanly. We rotate through the shared iProyal proxy
+pool (same pool used by autotrader_com) with curl_cffi Chrome impersonation.
+"""
 
 from __future__ import annotations
 
 import logging
 
-from curl_cffi import requests as cffi
 from curl_cffi.requests import AsyncSession
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from .config import (
-    DEFAULT_PAGE_SIZE,
-    LIST_PATH,
-    SITE_ORIGIN,
-    SORT_PARAM_NAME,
-    SORT_PRICE_DESC,
-)
+from shared.proxies import get_random_proxy, mark_bad
+
+from .config import LIST_PATH, SITE_ORIGIN, SORT_PARAM_NAME, SORT_PRICE_DESC
 
 logger = logging.getLogger(__name__)
 
-# Chrome impersonation — JamesEdition sits behind Cloudflare. A UA-only
-# httpx request gets a js-challenge page; curl_cffi handshakes past it.
 IMPERSONATE = "chrome124"
 
 _HEADERS = {
@@ -28,43 +26,51 @@ _HEADERS = {
     "Referer": f"{SITE_ORIGIN}/cars",
 }
 
-_RETRY = dict(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=12),
-    retry=retry_if_exception_type(
-        (cffi.exceptions.ConnectionError, cffi.exceptions.Timeout),
-    ),
-)
+
+def _is_cf_challenge(html: str) -> bool:
+    return not html or (len(html) < 50_000 and "just a moment" in html.lower())
 
 
-def new_session() -> AsyncSession:
-    """curl_cffi session impersonating Chrome 124. Reuse across calls so
-    Cloudflare clearance cookies persist.
-    """
-    return AsyncSession(impersonate=IMPERSONATE, timeout=45)
+class JESession:
+    """curl_cffi session with a residential proxy that bypasses Cloudflare."""
 
+    def __init__(self) -> None:
+        self._session: AsyncSession | None = None
+        self._proxy_url: str | None = None
 
-@retry(**_RETRY)
-async def fetch_list_page(session: AsyncSession, *, page: int) -> str:
-    """Fetch one SRP HTML page sorted ``price_desc``.
+    async def start(self) -> None:
+        proxy = get_random_proxy()
+        self._proxy_url = proxy.url if proxy else None
+        proxies = {"https": self._proxy_url, "http": self._proxy_url} if self._proxy_url else {}
+        self._session = AsyncSession(impersonate=IMPERSONATE, timeout=45, proxies=proxies)
+        logger.info("JESession: proxy=%s", self._proxy_url[:40] + "..." if self._proxy_url else "none")
 
-    Returns the raw HTML body. ``page`` starts at 1.
-    """
-    params = {SORT_PARAM_NAME: SORT_PRICE_DESC, "page": str(page)}
-    r = await session.get(
-        f"{SITE_ORIGIN}{LIST_PATH}", params=params, headers=_HEADERS,
-    )
-    r.raise_for_status()
-    return r.text
+    async def fetch_list_page(self, *, page: int) -> str:
+        url = f"{SITE_ORIGIN}{LIST_PATH}?{SORT_PARAM_NAME}={SORT_PRICE_DESC}&page={page}"
+        r = await self._session.get(url, headers=_HEADERS)
+        html = r.text
+        if _is_cf_challenge(html):
+            if self._proxy_url:
+                mark_bad(self._proxy_url)
+            raise RuntimeError(f"CF challenge on page {page} (status={r.status_code})")
+        return html
 
+    async def fetch_detail_html(self, *, url: str) -> str | None:
+        r = await self._session.get(url, headers=_HEADERS)
+        if r.status_code == 404:
+            return None
+        html = r.text
+        if _is_cf_challenge(html):
+            return None
+        return html
 
-@retry(**_RETRY)
-async def fetch_detail_html(session: AsyncSession, *, url: str) -> str | None:
-    """Fetch a detail HTML page. Returns ``None`` if the listing was pulled
-    (404) between the list + detail calls.
-    """
-    r = await session.get(url, headers=_HEADERS)
-    if r.status_code == 404:
-        return None
-    r.raise_for_status()
-    return r.text
+    async def close(self) -> None:
+        if self._session:
+            await self._session.close()
+
+    async def __aenter__(self):
+        await self.start()
+        return self
+
+    async def __aexit__(self, *_):
+        await self.close()

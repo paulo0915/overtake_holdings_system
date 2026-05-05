@@ -10,6 +10,8 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
+from shared.normalizer import extract_description_fields
+
 from .config import SITE_ORIGIN
 
 logger = logging.getLogger(__name__)
@@ -257,7 +259,7 @@ def extract_vin_from_title_or_desc(sdesc: str, desc_text: str) -> str | None:
 # Bonhams URL slugs embed the chassis number as: …chassis-no-<value>(-engine-no-…|end)
 # Example: /auction/31711/lot/115/1985-ferrari-testarossa-coupe-chassis-no-zffta17b000055031-engine-no-f113a-00060/
 _URL_CHASSIS_RE = re.compile(
-    r"chassis-no-([a-z0-9]+?)(?=-engine-no-|/?$)",
+    r"chassis-no-([a-z0-9][a-z0-9\-]*[a-z0-9])(?=-engine-no-|/?$)|chassis-no-([a-z0-9]+)(?=-engine-no-|/?$)",
     re.IGNORECASE,
 )
 
@@ -271,13 +273,17 @@ def extract_vin_from_url(listing_url: str) -> str | None:
     only in the URL (and not in the description body) still get a VIN populated.
     Description-extracted VINs take priority because Bonhams sometimes truncates
     the URL for SEO while keeping the full chassis string in the description.
+
+    The regex allows internal hyphens in chassis numbers (e.g. ``abc-123``) while
+    stopping before the ``-engine-no-`` delimiter so the two values don't merge.
     """
     if not listing_url:
         return None
     m = _URL_CHASSIS_RE.search(listing_url)
     if not m:
         return None
-    candidate = m.group(1).upper()
+    # Group 1 matches hyphenated chassis (length >= 3); group 2 matches plain alphanumeric.
+    candidate = (m.group(1) or m.group(2) or "").upper()
     if 5 <= len(candidate) <= 25:
         return candidate
     return None
@@ -315,6 +321,46 @@ def parse_mileage_mi_from_desc(desc_text: str) -> int | None:
     return None
 
 
+def _parse_structured_mileage(lot: dict[str, Any]) -> int | None:
+    """Extract mileage from Bonhams __NEXT_DATA__ structured fields.
+
+    Bonhams exposes several possible mileage keys in the lot JSON:
+      dMileage / dKilometres / dOdometer — numeric values
+      sMileageUnit / sOdometerUnit       — unit string ("Miles", "Kilometres", etc.)
+    We try each in priority order and convert to integer miles.
+    """
+    # Try miles-first fields.
+    for key in ("dMileage",):
+        raw = lot.get(key)
+        if raw is not None:
+            try:
+                val = float(str(raw).replace(",", ""))
+                if val > 0:
+                    unit = (lot.get("sMileageUnit") or "").lower()
+                    if "km" in unit or "kilo" in unit:
+                        return int(round(val * 0.621371))
+                    return int(round(val))
+            except (ValueError, TypeError):
+                pass
+
+    # Try km-first fields.
+    for key in ("dKilometres", "dOdometer"):
+        raw = lot.get(key)
+        if raw is not None:
+            try:
+                val = float(str(raw).replace(",", ""))
+                if val > 0:
+                    unit = (lot.get("sOdometerUnit") or lot.get("sMileageUnit") or "").lower()
+                    if "mile" in unit or "mi" == unit.strip():
+                        return int(round(val))
+                    # Default assumption for these keys is km.
+                    return int(round(val * 0.621371))
+            except (ValueError, TypeError):
+                pass
+
+    return None
+
+
 def parse_lot_detail_next_data(html: str) -> dict[str, Any] | None:
     """Pull the detail ``lot`` dict + cleaned description from a lot detail HTML page."""
     data = extract_next_data(html)
@@ -330,14 +376,17 @@ def parse_lot_detail_next_data(html: str) -> dict[str, Any] | None:
 
     year, make, model, clean_title = parse_title_for_year_make_model(sdesc)
     vin = extract_vin_from_title_or_desc(sdesc, desc_text)
-    mileage_mi = parse_mileage_mi_from_desc(desc_text)
-    transmission = extract_transmission(desc_text)
-    engine_spec = extract_engine_spec(desc_text)
-    ext_color = extract_ext_color(desc_text)
-    # Interior-colour extraction from Bonhams prose was tried but produced too
-    # many false positives ("Italian", "Ambla", etc.). Left null until a more
-    # reliable signal appears in the source.
-    int_color = None
+
+    # Structured mileage fields take priority over description-text regex.
+    mileage_mi = _parse_structured_mileage(lot) or parse_mileage_mi_from_desc(desc_text)
+
+    # Use the shared description extractor which has richer, battle-tested patterns
+    # for engine, transmission, and both color fields.
+    desc_fields = extract_description_fields(desc_text) if desc_text else {}
+    engine_spec = desc_fields.get("engine")
+    transmission = desc_fields.get("transmission")
+    ext_color = desc_fields.get("ext_color")
+    int_color = desc_fields.get("int_color")
 
     images = lot.get("images") or []
     image_url = None

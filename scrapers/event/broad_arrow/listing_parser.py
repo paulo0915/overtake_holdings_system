@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urljoin
 
-from shared.normalizer import normalize_engine_spec
+from shared.normalizer import extract_description_fields, normalize_engine_spec, normalize_transmission
 
 from scrapers.event.mecum import extract_vin_from_description
 
@@ -512,6 +512,15 @@ def parse_vehicle_detail(
     reserve = _extract_reserve(html)
     description = _extract_description(html)
 
+    # Mine description prose for fields the JSON-LD Car schema doesn't carry.
+    desc_fields = extract_description_fields(description or "") if description else {}
+    ext_color = desc_fields.get("ext_color")
+    int_color = desc_fields.get("int_color")
+    transmission = normalize_transmission(desc_fields.get("transmission") or "") if desc_fields.get("transmission") else None
+    # Use description engine only when JSON-LD vehicleEngine was absent.
+    if not engine_spec and desc_fields.get("engine"):
+        engine_spec = desc_fields["engine"]
+
     if mode == "upcoming":
         # Default: empty for live-upcoming lots. If a banner like "Sold Before
         # Auction" is present, surface that as the status instead.
@@ -528,10 +537,10 @@ def parse_vehicle_detail(
         "model": model,
         "vin": vin,
         "mileage_mi": mileage_mi,
-        "ext_color": None,
-        "int_color": None,
+        "ext_color": ext_color,
+        "int_color": int_color,
         "engine_spec": engine_spec,
-        "transmission": None,
+        "transmission": transmission,
         "lot_number": lot_number,
         "hammer": hammer,
         "estimate_low": estimate_low,

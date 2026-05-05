@@ -14,17 +14,12 @@ Flow
    - Lots with "Undisclosed" price are marked Sold with no price value.
 5. Export to CSV + Excel.
 
-VINs are NOT available in the POST response — they only appear on individual
-``/product/{slug}/`` pages. Fetching ~10,000 product pages is impractical;
-VIN remains empty unless a future detail-fetch pass is added.
-
 ``--max-pages N``: cap exported lots to N (0 = all).  For a quick smoke test
 use ``--max-pages 50``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 import httpx
@@ -81,16 +76,16 @@ class WorldwideAuctioneersScraper(BaseScraper):
             html = await post_car_search(session, form)
             logger.info("POST response: %s bytes", len(html))
 
-        rows = parse_car_search_results(html)
-        car_rows = len(rows)
-        logger.info(
-            "Parsed %s car lots (non-car lots filtered out — memorabilia, signs, etc.)",
-            car_rows,
-        )
+            rows = parse_car_search_results(html)
+            car_rows = len(rows)
+            logger.info(
+                "Parsed %s car lots (non-car lots filtered out — memorabilia, signs, etc.)",
+                car_rows,
+            )
 
-        if self.max_pages > 0:
-            rows = rows[: self.max_pages]
-            logger.info("Capped to %s lots for test run", len(rows))
+            if self.max_pages > 0:
+                rows = rows[: self.max_pages]
+                logger.info("Capped to %s lots for test run", len(rows))
 
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as fx_client:
             fx = FXConverter(fx_client)

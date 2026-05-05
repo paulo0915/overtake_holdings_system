@@ -21,6 +21,8 @@ import html as html_lib
 import re
 from typing import Any
 
+from shared.normalizer import extract_description_fields, normalize_transmission
+
 from .config import CAR_SEARCH_ALL_LISTINGS_BODY, LISTINGS_ORIGIN
 
 # ---------------------------------------------------------------------------
@@ -157,9 +159,101 @@ def parse_car_search_results(html: str) -> list[dict[str, Any]]:
             "price_disclosed": price_disclosed,
             "currency": "USD",
             "image_url": img_src,
-            # VIN not available in POST response — would require per-product page fetch
+            "product_url": None,   # populated by scraper from inventory page
             "vin": None,
             "mileage_mi": None,
+            "engine_spec": None,
+            "transmission": None,
+            "ext_color": None,
+            "int_color": None,
         })
 
     return out
+
+
+# ---------------------------------------------------------------------------
+# Product page (individual lot detail) parsers
+# ---------------------------------------------------------------------------
+
+_VIN_H4_RE = re.compile(r'<h4[^>]*>\s*VIN\s*:\s*([A-HJ-NPR-Z0-9]{17})\s*</h4>', re.I)
+_VIN_ANY_RE = re.compile(r'\bVIN\s*[:\-]?\s*([A-HJ-NPR-Z0-9]{17})\b', re.I)
+_MILEAGE_PRODUCT_RE = re.compile(
+    r'([\d,]+)\s*(?:miles?|mi\b|kilometers?|km\b)', re.I,
+)
+_PRODUCT_URL_RE = re.compile(
+    r'href=["\'](' + re.escape(LISTINGS_ORIGIN) + r'/product/[^"\']+)["\']',
+    re.I,
+)
+
+
+def extract_product_urls_from_inventory(html: str) -> list[str]:
+    """Pull ``/product/<slug>/`` URLs from the inventory grid page."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _PRODUCT_URL_RE.finditer(html):
+        url = m.group(1).rstrip("/") + "/"
+        if url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def parse_product_page(html: str | None) -> dict[str, Any]:
+    """Parse a ``/product/{slug}/`` detail page for structured fields.
+
+    Returns a dict with: vin, mileage_mi, engine_spec, transmission,
+    ext_color, int_color. All values may be None when absent.
+    """
+    empty: dict[str, Any] = {
+        "vin": None, "mileage_mi": None, "engine_spec": None,
+        "transmission": None, "ext_color": None, "int_color": None,
+    }
+    if not html:
+        return empty
+
+    # VIN — site renders ``<h4>VIN: XXXXXXXXXXXXXXXXX</h4>``
+    vin: str | None = None
+    m = _VIN_H4_RE.search(html)
+    if m:
+        vin = m.group(1).upper()
+    if not vin:
+        m = _VIN_ANY_RE.search(html)
+        if m:
+            vin = m.group(1).upper()
+
+    # Strip tags to get plain text for description mining.
+    text = re.sub(r"<br\s*/?>", "\n", html, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_lib.unescape(text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    # Mileage — scan plain text for a mileage figure.
+    mileage_mi: int | None = None
+    mm = _MILEAGE_PRODUCT_RE.search(text)
+    if mm:
+        try:
+            raw_val = int(mm.group(1).replace(",", ""))
+            unit_text = mm.group(0).lower()
+            if "km" in unit_text or "kilo" in unit_text:
+                mileage_mi = round(raw_val * 0.621371)
+            else:
+                mileage_mi = raw_val
+        except ValueError:
+            pass
+
+    # Engine, transmission, colors from shared description extractor.
+    desc_fields = extract_description_fields(text)
+    engine_spec = desc_fields.get("engine")
+    transmission = desc_fields.get("transmission")
+    ext_color = desc_fields.get("ext_color")
+    int_color = desc_fields.get("int_color")
+
+    return {
+        "vin": vin,
+        "mileage_mi": mileage_mi,
+        "engine_spec": engine_spec,
+        "transmission": transmission,
+        "ext_color": ext_color,
+        "int_color": int_color,
+    }

@@ -7,15 +7,23 @@ import logging
 import re
 from typing import Any
 
+from shared.normalizer import extract_description_fields
+
 from .config import IMAGE_CDN_BASE, SITE_ORIGIN
 
 logger = logging.getLogger(__name__)
 
-# Bundled path list starts with the first object of the big ``[{path, matchPath}, …]`` array.
-_PATH_LIST_START_RE = re.compile(r'\[\s*\{\s*"path"\s*:\s*"/auction/')
+# Bundled path list: ``[{"path":"/…","matchPath":…},…]``.
+# The first entry used to be ``/auction/`` but changes with each deploy — we
+# match any ``[{"path":`` opening so the anchor never goes stale.
+_PATH_LIST_START_RE = re.compile(r'\[\s*\{\s*"path"\s*:\s*"/')
 
 # ``/lot/<slug>`` — drop trailing slash if any (none in app.js payload).
 _LOT_PATH_RE = re.compile(r"^/lot/[a-z0-9][a-z0-9\-]*$", re.I)
+
+# Inline lot-path strings scattered through minified app.js bundles.
+# Matches ``"/lot/some-slug"`` or ``'/lot/some-slug'`` anywhere in the JS.
+_INLINE_LOT_RE = re.compile(r'["\'](/lot/[a-z0-9][a-z0-9\-]+)["\']', re.I)
 
 # Gooding always titles cars with a leading year: ``1969 Ferrari 365 GTB/4 Daytona``.
 _YEAR_LEADING_RE = re.compile(r"^(?:19|20)\d{2}\b")
@@ -37,29 +45,77 @@ _TRANS_BRAKE_RE = re.compile(r"transmission\s+brake", re.I)
 
 
 def extract_paths_from_app_js(js_text: str) -> list[dict[str, str]]:
-    """Find and parse the embedded ``[{path, matchPath}, …]`` JSON array in the bundle."""
+    """Find and parse the embedded ``[{path, matchPath}, …]`` JSON array in the bundle.
+
+    Falls back to inline regex scanning when the JSON array cannot be parsed
+    (e.g. the bundle has been minified in a way that breaks balanced-bracket
+    extraction, or the first entry is no longer ``/auction/``).
+    """
     m = _PATH_LIST_START_RE.search(js_text)
-    if not m:
+    if m:
+        start = m.start()
+        depth = 0
+        i = start
+        n = len(js_text)
+        while i < n:
+            c = js_text[i]
+            if c == "[":
+                depth += 1
+            elif c == "]":
+                depth -= 1
+                if depth == 0:
+                    raw = js_text[start : i + 1]
+                    try:
+                        entries = json.loads(raw)
+                        if entries:
+                            return entries
+                    except json.JSONDecodeError as e:
+                        logger.warning("Failed to parse app.js path list JSON: %s", e)
+                    break
+            i += 1
+
+    # Fallback: scan the whole bundle for quoted ``/lot/<slug>`` strings.
+    # This catches bundles where the structured array is absent or malformed.
+    logger.info("app.js JSON array parse failed — falling back to inline /lot/ scan")
+    seen: set[str] = set()
+    entries_fallback: list[dict[str, str]] = []
+    for fm in _INLINE_LOT_RE.finditer(js_text):
+        p = fm.group(1)
+        if p not in seen:
+            seen.add(p)
+            entries_fallback.append({"path": p})
+    if entries_fallback:
+        logger.info("Inline scan found %s /lot/ paths", len(entries_fallback))
+    return entries_fallback
+
+
+def parse_lot_paths_from_lots_page(payload: dict | None) -> list[str]:
+    """Extract ``/lot/<slug>`` paths from the ``/page-data/lots/page-data.json`` response.
+
+    Gooding's lots catalog page embeds an ``allContentfulLot`` (or similar) node
+    array. We walk the result tree looking for slug strings and build paths from them.
+    Returns a deduplicated list of ``/lot/<slug>`` strings.
+    """
+    if not payload:
         return []
-    start = m.start()
-    depth = 0
-    i = start
-    n = len(js_text)
-    while i < n:
-        c = js_text[i]
-        if c == "[":
-            depth += 1
-        elif c == "]":
-            depth -= 1
-            if depth == 0:
-                raw = js_text[start : i + 1]
-                try:
-                    return json.loads(raw)
-                except json.JSONDecodeError as e:
-                    logger.warning("Failed to parse app.js path list: %s", e)
-                    return []
-        i += 1
-    return []
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            # A node with a ``slug`` that looks like a lot slug.
+            slug = obj.get("slug") or obj.get("path") or ""
+            if isinstance(slug, str) and _LOT_PATH_RE.match(f"/lot/{slug}") and slug not in seen:
+                seen.add(slug)
+                out.append(f"/lot/{slug}")
+            for v in obj.values():
+                _walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    _walk(payload)
+    return out
 
 
 def select_lot_paths(entries: list[dict[str, str]]) -> list[str]:
@@ -178,6 +234,12 @@ def parse_lot_page_data(payload: dict[str, Any], *, path: str) -> dict[str, Any]
 
     transmission = parse_transmission_from_specs(item.get("specifications") or [])
 
+    # Extract colors from the combined description (highlights + specifications text).
+    description_text = _join_description(item)
+    desc_fields = extract_description_fields(description_text or "") if description_text else {}
+    ext_color = desc_fields.get("ext_color")
+    int_color = desc_fields.get("int_color")
+
     sale_price = lot.get("salePrice")
     low = lot.get("lowEstimate")
     high = lot.get("highEstimate")
@@ -199,6 +261,8 @@ def parse_lot_page_data(payload: dict[str, Any], *, path: str) -> dict[str, Any]
         "vin": item.get("chassis") or None,
         "engine_spec": item.get("engine") or None,
         "transmission": transmission,
+        "ext_color": ext_color,
+        "int_color": int_color,
         "mileage_mi": None,  # Not provided as structured data.
         "lot_number": str(lot.get("lotNumber")) if lot.get("lotNumber") is not None else None,
         "auction_name": auction_name,
