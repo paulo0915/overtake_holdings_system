@@ -91,6 +91,7 @@ async def build_records(
                 "FX_rate_used": fx_rate,
                 "Selling_date": selling_date,
                 "Auction_house": "The MB Market",
+                "Auction_event": None,
                 "Country": s.get("country") or "USA",
                 "Image_url": s.get("image_url"),
                 "Listing_url": s.get("listing_url"),

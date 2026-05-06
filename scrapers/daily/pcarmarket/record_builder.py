@@ -102,6 +102,7 @@ async def build_records(
             "FX_rate_used": fx_rate,
             "Selling_date": selling_date,
             "Auction_house": "PCarMarket",
+                "Auction_event": None,
             "Country": parsed["country"],
             "Image_url": parsed["image_url"],
             "Listing_url": parsed["listing_url"],

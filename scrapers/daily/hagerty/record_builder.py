@@ -131,6 +131,7 @@ async def build_records(
             "FX_rate_used": fx_rate,
             "Selling_date": selling_date,
             "Auction_house": "Hagerty Marketplace",
+                "Auction_event": None,
             "Country": country,
             "Image_url": image_url,
             "Listing_url": listing_url,

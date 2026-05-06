@@ -95,7 +95,7 @@ class BarrettJacksonScraper(BaseScraper):
                         page_size=DEFAULT_PAGE_SIZE,
                         sort=DEFAULT_SORT,
                         result_type=DEFAULT_RESULT_TYPE,
-                        non_included_slugs=NON_INCLUDED_SLUGS,
+                        non_included_slugs=non_included_slugs,
                     )
                 except Exception as e:
                     logger.warning("API page %s: %s - stopping pagination", page, e)

@@ -43,15 +43,8 @@ async def build_records(
         d = details.get(wid)
         m = merge_hit_and_detail(s, d)
 
-        # Build the exported description once; reuse for both enrichment and the CSV column.
         base_desc = m.get("listing_description")
-        event = m.get("auction_event")
-        desc = (
-            f"Auction: {event}\n\n{base_desc}"
-            if event and base_desc
-            else (f"Auction: {event}" if event else base_desc)
-        )
-        enrich_vin_and_transmission_from_description(m, desc)
+        enrich_vin_and_transmission_from_description(m, base_desc)
 
         hammer = m.get("hammer_usd")
         sold_status = (m.get("sold_status") or "Sold").strip() or "Sold"
@@ -92,11 +85,12 @@ async def build_records(
                 "FX_rate_used": fx_rate,
                 "Selling_date": selling_date,
                 "Auction_house": "Mecum",
+                "Auction_event": m.get("auction_event"),
                 "Country": "USA",
                 "Image_url": m.get("image_url"),
                 "Listing_url": m.get("listing_url"),
                 "Source": "mecum.com",
-                "Listing_description": desc,
+                "Listing_description": base_desc,
                 "Scraped_at": scraped_at,
             }
         )

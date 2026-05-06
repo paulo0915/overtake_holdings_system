@@ -50,14 +50,6 @@ async def build_records(
                 selling_price, currency, selling_date,
             )
 
-        event = m.get("auction_event")
-        base_desc = m.get("listing_description")
-        desc = (
-            f"Auction: {event}\n\n{base_desc}"
-            if event and base_desc
-            else (f"Auction: {event}" if event else base_desc)
-        )
-
         records.append(
             {
                 "Record_ID": rid,
@@ -83,11 +75,12 @@ async def build_records(
                 "FX_rate_used": fx_rate,
                 "Selling_date": selling_date,
                 "Auction_house": "Barrett-Jackson",
+                "Auction_event": m.get("auction_event"),
                 "Country": "USA",
                 "Image_url": m.get("image_url"),
                 "Listing_url": m.get("listing_url"),
                 "Source": "barrett-jackson.com",
-                "Listing_description": desc,
+                "Listing_description": m.get("listing_description"),
                 "Scraped_at": scraped_at,
             },
         )

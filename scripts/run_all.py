@@ -91,14 +91,16 @@ def _run_scraper(
     *,
     min_price: int | None,
     max_pages: int,
+    source_page_overrides: dict[str, int] | None = None,
     extra_args: list[str],
 ) -> tuple[int, float]:
     """Run run_scraper.py for one source/mode. Returns (exit_code, elapsed_s)."""
+    effective_pages = (source_page_overrides or {}).get(source, max_pages)
     cmd = [
         sys.executable,
         str(ROOT / "scripts" / "run_scraper.py"),
         "--source", source,
-        "--max-pages", str(max_pages),
+        "--max-pages", str(effective_pages),
     ]
     if mode:
         cmd += ["--mode", mode]
@@ -184,6 +186,10 @@ def main() -> None:
         help="Skip the final DB->CSV export step",
     )
     parser.add_argument(
+        "--gooding-pages", type=int, default=None,
+        help="Override --max-pages for Gooding only (e.g. --gooding-pages 10)",
+    )
+    parser.add_argument(
         "--no-filter", action="store_true",
         help="Disable vehicle filter for all scrapers (debugging only)",
     )
@@ -207,6 +213,9 @@ def main() -> None:
     skip = set(args.skip) if args.skip else set()
     extra = ["--no-filter"] if args.no_filter else []
     extra += ["--output-dir", args.output_dir]
+    source_page_overrides: dict[str, int] = {}
+    if args.gooding_pages is not None:
+        source_page_overrides["gooding"] = args.gooding_pages
 
     # -- 1. Optional DB reset ---------------------------------------------
     if args.reset:
@@ -250,6 +259,7 @@ def main() -> None:
             code, mode,
             min_price=args.min_price,
             max_pages=args.max_pages,
+            source_page_overrides=source_page_overrides,
             extra_args=extra,
         )
         label = f"{code}/{mode}" if mode else code

@@ -101,8 +101,12 @@ class GoodingScraper(BaseScraper):
             logger.info("Total unique lot paths to scrape: %s", len(lot_paths))
 
             if max_lots > 0:
-                lot_paths = lot_paths[:max_lots]
-                logger.info("Limited to %s lot(s) for test run", max_lots)
+                # Sample evenly across the full path list so test runs include a mix
+                # of lot types rather than only the alphabetically-first entries
+                # (which tend to be automobilia/scale-models, not vehicles).
+                step = max(1, len(lot_paths) // max_lots)
+                lot_paths = lot_paths[::step][:max_lots]
+                logger.info("Limited to %s lot(s) for test run (sampled every %s)", max_lots, step)
 
             # --- Step 2: concurrent per-lot page-data fetches -----------------
             detail_conc = max(1, min(self.max_concurrent, 8))

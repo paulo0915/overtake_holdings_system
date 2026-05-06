@@ -25,6 +25,7 @@ AUCTION_COLUMNS = [
     "FX_rate_used",
     "Selling_date",
     "Auction_house",
+    "Auction_event",
     "Country",
     "Image_url",
     "Listing_url",

@@ -91,6 +91,7 @@ async def build_records(
                 "FX_rate_used": fx_rate,
                 "Selling_date": selling_date,
                 "Auction_house": "Gooding & Company",
+                "Auction_event": m.get("auction_name"),
                 "Country": "USA",
                 "Image_url": m.get("image_url"),
                 "Listing_url": m.get("listing_url"),

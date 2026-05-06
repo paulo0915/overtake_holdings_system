@@ -41,7 +41,7 @@ _YEAR_LEADING_RE = re.compile(r"^(?P<year>(?:19|20)\d{2})\b\s+(?P<rest>.+)$")
 # yielding VINs like ``WP0ZZZ96ZPS470173ENGINENO`` (see P1 §1.2 bug report).
 # ``[A-Z0-9\-*/]`` with no space stops at the first whitespace boundary.
 _CHASSIS_RE = re.compile(
-    r"Chassis\s*(?:no\.?|Number)\s*[:.]?\s*([A-Z0-9][A-Z0-9\-*/]{4,24})",
+    r"Chassis\s*(?:no\.?|Number)\s*[:.]?\s*\*?([A-Z0-9][A-Z0-9\-/]{4,24})",
     re.I,
 )
 _VIN_LIKE_RE = re.compile(r"^[A-HJ-NPR-Z0-9]{17}$", re.I)
@@ -259,7 +259,7 @@ def extract_vin_from_title_or_desc(sdesc: str, desc_text: str) -> str | None:
 # Bonhams URL slugs embed the chassis number as: …chassis-no-<value>(-engine-no-…|end)
 # Example: /auction/31711/lot/115/1985-ferrari-testarossa-coupe-chassis-no-zffta17b000055031-engine-no-f113a-00060/
 _URL_CHASSIS_RE = re.compile(
-    r"chassis-no-([a-z0-9][a-z0-9\-]*[a-z0-9])(?=-engine-no-|/?$)|chassis-no-([a-z0-9]+)(?=-engine-no-|/?$)",
+    r"chassis-no-([^/]+?)(?=-engine-no-|-frame-no-|-reg-no-|/?$)",
     re.IGNORECASE,
 )
 
@@ -282,8 +282,7 @@ def extract_vin_from_url(listing_url: str) -> str | None:
     m = _URL_CHASSIS_RE.search(listing_url)
     if not m:
         return None
-    # Group 1 matches hyphenated chassis (length >= 3); group 2 matches plain alphanumeric.
-    candidate = (m.group(1) or m.group(2) or "").upper()
+    candidate = m.group(1).upper()
     if 5 <= len(candidate) <= 25:
         return candidate
     return None

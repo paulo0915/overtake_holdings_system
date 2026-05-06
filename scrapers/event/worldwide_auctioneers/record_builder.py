@@ -87,11 +87,12 @@ async def build_records(
                 "FX_rate_used": fx_rate,
                 "Selling_date": selling_date,
                 "Auction_house": "Worldwide Auctioneers",
+                "Auction_event": event or None,
                 "Country": "USA",
                 "Image_url": m.get("image_url"),
                 "Listing_url": f"https://listings.worldwideauctioneers.com/inventory/#lot-{rid}",
                 "Source": "listings.worldwideauctioneers.com",
-                "Listing_description": event or None,
+                "Listing_description": None,
                 "Scraped_at": scraped_at,
             },
         )

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS auctions (
     FX_rate_used    REAL,
     Selling_date    TEXT,
     Auction_house   TEXT,
+    Auction_event   TEXT,
     Country         TEXT,
     Image_url       TEXT,
     Listing_url     TEXT NOT NULL UNIQUE,
