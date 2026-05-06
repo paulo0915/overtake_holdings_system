@@ -3,6 +3,7 @@
 import logging
 
 from shared.fx_converter import FXConverter
+from shared.normalizer import is_non_car_make
 
 from .config import HAGERTY_MARKETPLACE_BASE
 from .listing_parser import as_year, location_to_country, sold_status_from_flags
@@ -32,6 +33,9 @@ async def build_records(
         seen.add(aid)
 
         title = s.get("title") or ""
+        if is_non_car_make(s.get("make")):
+            skipped["filter"] += 1
+            continue
         if vehicle_filter and title:
             if not vehicle_filter.match(title, ""):
                 skipped["filter"] += 1

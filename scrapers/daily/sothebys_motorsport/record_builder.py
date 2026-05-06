@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from shared.fx_converter import FXConverter
+from shared.normalizer import is_non_car_make
 
 from .listing_parser import sold_status_from_row
 
@@ -46,6 +47,9 @@ async def build_records(
         seen.add(aid)
 
         title = s.get("title") or ""
+        if is_non_car_make(s.get("make")):
+            skipped["filter"] += 1
+            continue
         if vehicle_filter and title:
             if not vehicle_filter.match(title, ""):
                 skipped["filter"] += 1

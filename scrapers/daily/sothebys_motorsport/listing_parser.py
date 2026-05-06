@@ -35,6 +35,18 @@ _CA_PROVINCE_NAMES = frozenset({
     "nunavut", "ontario", "prince edward island", "quebec", "saskatchewan", "yukon",
 })
 _VIN_RE = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
+
+# Patterns that appear before the real make in SBM's API make field:
+# e.g. "Original-Owner 920-Mile Porsche", "#285/1963 Ferrari", "Rare 1k-Mile BMW"
+_MAKE_NOISE_PREFIX = re.compile(
+    r"^(?:"
+    r"(?:#\d+/\d+\s+)"                          # serial prefix like "#285/1963"
+    r"|(?:[A-Za-z\-]+\s+)?[\d,]+[kK]?-?(?:Mile|Mi|Miles)\s+"  # mileage prefix
+    r"|(?:Original[- ]Owner\s+)"               # ownership prefix
+    r"|(?:Rare\s+)"                             # marketing noise
+    r")+",
+    re.IGNORECASE,
+)
 _DT_ENGINE_HINT = re.compile(
     r"(?:\d(?:\.\d+)?\s*[- ]?\s*(?:liter|litre)\b)|\bcylinder\b|\bflat\s*\d|\bv\d{1,2}\b|\bw\d{1,2}\b|"
     r"quad[- ]?turbo|twin[- ]?turbo|fuel\s+inject|injected|mpi|efi",
@@ -171,6 +183,8 @@ def parse_summary_from_api_row(raw: dict[str, Any]) -> dict[str, Any]:
     auction_id = str(raw.get("auctionId") or "")
     year = vd.get("year") if vd.get("year") is not None else raw.get("year")
     make = vd.get("make") if vd.get("make") is not None else raw.get("make")
+    if isinstance(make, str):
+        make = _MAKE_NOISE_PREFIX.sub("", make).strip() or None
     model = vd.get("model") if vd.get("model") is not None else raw.get("model")
     title = " ".join(str(x) for x in (year, make, model) if x not in (None, "")).strip()
 

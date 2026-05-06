@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from shared.fx_converter import FXConverter
+from shared.normalizer import is_non_car_make
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,9 @@ async def build_records(
         seen.add(rid)
 
         title = (m.get("title") or "").strip()
+        if is_non_car_make(m.get("make")):
+            skipped["filter"] += 1
+            continue
         if vehicle_filter and title:
             if not vehicle_filter.match(title, ""):
                 skipped["filter"] += 1
@@ -50,7 +54,7 @@ async def build_records(
         # Falls back to the JSON-LD currency if the event metadata is unavailable.
         slug = _event_slug(m.get("listing_url") or "")
         ev = (event_meta or {}).get(slug or "", {}) if slug else {}
-        country = ev.get("country") or None
+        country = ev.get("country") or "USA"
         currency = (
             ev.get("currency")
             or (m.get("currency") or "").strip()
@@ -112,7 +116,7 @@ async def build_records(
     return records
 
 
-def _build_upcoming_row(m, currency, selling_date, scraped_at, *, country=None):
+def _build_upcoming_row(m, currency, selling_date, scraped_at, *, country="USA"):
     """Upcoming: empty Sold_status, no hammer/bid, estimate range is the signal."""
     has_est = m.get("estimate_low") is not None or m.get("estimate_high") is not None
     return {

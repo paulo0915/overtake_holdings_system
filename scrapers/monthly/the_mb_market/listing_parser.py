@@ -20,6 +20,10 @@ _ENGINE_LI_RE = re.compile(
     re.IGNORECASE,
 )
 _NO_RESERVE_PREFIX = re.compile(r"^\s*NO\s+RESERVE:\s*", re.IGNORECASE)
+_MILEAGE_PREFIX = re.compile(
+    r"^\s*(?:[A-Za-z\-]+\s+)?[\d,]+[kK]?-?(?:Mile|Mi|Miles|Kilometer|Km)\s+",
+    re.IGNORECASE,
+)
 _PLACEHOLDER_IMG_RE = re.compile(
     r"placeholder|loading\.png|/uploads/placeholder",
     re.IGNORECASE,
@@ -223,6 +227,7 @@ def parse_detail_html(html: str | None) -> dict[str, Any]:
 def parse_year_make_model(title: str) -> tuple[int | None, str | None, str | None]:
     """Best-effort split from listing title."""
     t = _NO_RESERVE_PREFIX.sub("", title or "").strip()
+    t = _MILEAGE_PREFIX.sub("", t).strip()
     m = re.search(r"\b(19\d{2}|20\d{2})\b", t)
     if not m:
         return None, None, t or None

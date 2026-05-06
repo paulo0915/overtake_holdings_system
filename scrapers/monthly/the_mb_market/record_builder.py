@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from shared.fx_converter import FXConverter
+from shared.normalizer import is_non_car_make
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,9 @@ async def build_records(
         # Real car listings always start with a 4-digit model year. Parts titles
         # read like ``Pair of 17" AMG Aero II Monoblock Wheels for W124``.
         if not s.get("year"):
+            skipped["non_car"] += 1
+            continue
+        if is_non_car_make(s.get("make")):
             skipped["non_car"] += 1
             continue
         if vehicle_filter and title:
@@ -67,7 +71,7 @@ async def build_records(
                 "Record_ID": rid,
                 "Title": title,
                 "Year": s.get("year"),
-                "Make": s.get("make"),
+                "Make": "Mercedes-Benz",
                 "Model": s.get("model"),
                 "VIN": s.get("vin"),
                 "Mileage_mi": s.get("mileage_mi"),
@@ -87,7 +91,7 @@ async def build_records(
                 "FX_rate_used": fx_rate,
                 "Selling_date": selling_date,
                 "Auction_house": "The MB Market",
-                "Country": s.get("country"),
+                "Country": s.get("country") or "USA",
                 "Image_url": s.get("image_url"),
                 "Listing_url": s.get("listing_url"),
                 "Source": "thembmarket.com",

@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from shared.fx_converter import FXConverter
+from shared.normalizer import is_non_car_make
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,9 @@ async def build_records(
         seen.add(rid)
 
         title = (m.get("title") or "").strip()
+        if is_non_car_make(m.get("make")):
+            skipped["filter"] += 1
+            continue
         if vehicle_filter and title:
             if not vehicle_filter.match(title, ""):
                 skipped["filter"] += 1

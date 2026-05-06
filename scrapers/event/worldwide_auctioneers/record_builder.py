@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from shared.fx_converter import FXConverter
+from shared.normalizer import is_non_car_make
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,9 @@ async def build_records(
         seen.add(rid)
 
         title = (m.get("title") or "").strip()
+        if is_non_car_make(m.get("make")):
+            skipped["filter"] += 1
+            continue
         if vehicle_filter and title:
             if not vehicle_filter.match(title, ""):
                 skipped["filter"] += 1
@@ -46,8 +50,8 @@ async def build_records(
             skipped["unsold"] += 1
             continue
 
-        sold_status = "Sold"
         selling_price = price
+        sold_status = "Sold" if selling_price is not None else "Sold - Price Undisclosed"
         selling_date = m.get("selling_date")
 
         selling_price_usd = fx_rate = None
