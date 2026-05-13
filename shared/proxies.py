@@ -146,9 +146,29 @@ def get_random_proxy() -> ProxyInfo | None:
 def mark_bad(proxy_url: str) -> None:
     """Flip ``is_bad=true`` for the given proxy URL. Idempotent — safe to
     call repeatedly on the same value.
+
+    Proxies are stored in shorthand form (``host:port:user:pass``) but
+    ``mark_bad`` receives a URL (``http://user:pass@host:port``). We try
+    both the URL form and the reconstructed shorthand so the WHERE clause
+    matches regardless of how the row was originally inserted.
     """
     client = get_client()
-    client.table("proxies").update({"is_bad": True}).eq("proxy", proxy_url).execute()
+    updated = (
+        client.table("proxies")
+        .update({"is_bad": True})
+        .eq("proxy", proxy_url)
+        .execute()
+    )
+    if not (updated.data or []):
+        # URL form didn't match — reconstruct shorthand and retry.
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(proxy_url)
+            if p.hostname and p.port and p.username and p.password:
+                shorthand = f"{p.hostname}:{p.port}:{p.username}:{p.password}"
+                client.table("proxies").update({"is_bad": True}).eq("proxy", shorthand).execute()
+        except Exception:
+            pass
     logger.info("Marked proxy as bad: %s", _redact(proxy_url))
 
 

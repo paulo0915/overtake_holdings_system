@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
-from shared.normalizer import normalize_engine_spec, normalize_transmission
+from shared.normalizer import normalize_engine_spec, normalize_transmission, normalize_vin
 
 from scrapers.event.mecum import (
     extract_transmission_from_description,
@@ -170,7 +170,7 @@ def parse_docket_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
     elif isinstance(price_dec, float) and price_dec.is_integer():
         hammer = int(price_dec)
 
-    vin = ((attrs.get("vin") or attrs.get("VIN") or "").strip() or None)
+    vin = normalize_vin((attrs.get("vin") or attrs.get("VIN") or "").strip() or None)
     trans_raw = (attrs.get("transmission_type_name") or attrs.get("transmission") or "").strip() or None
     transmission = normalize_transmission(trans_raw)
 

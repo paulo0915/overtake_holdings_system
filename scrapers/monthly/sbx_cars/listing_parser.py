@@ -330,6 +330,38 @@ def parse_detail_html(html: str | None) -> dict[str, Any]:
                         out["engine_spec"] = snippet
                     break
 
+    # ── VIN + Lot# from rendered <li><div class="data-item"> pairs ────────────
+    # SBX renders specs in list items whose JSON anchor may differ from the
+    # escaped blob — use BeautifulSoup as the authoritative fallback.
+    if not out.get("vin") or not out.get("lot_number_html"):
+        for li in soup.find_all("li"):
+            data_item = li.find("div", class_=lambda c: c and "data-item" in (c or ""))
+            if not data_item:
+                continue
+            title_el = data_item.find("div", class_=lambda c: c and "title" in (c or ""))
+            val_el = data_item.find("div", class_=lambda c: c and "value" in (c or ""))
+            if not val_el:
+                continue
+            label = (title_el.get_text(strip=True) if title_el else "").lower().strip(":").strip()
+            val = val_el.get_text(strip=True)
+            if not val:
+                continue
+            if not out.get("vin") and "vin" in label:
+                compact = re.sub(r"[\s\-]+", "", val).upper()
+                if re.match(r"^[A-HJ-NPR-Z0-9]{4,25}$", compact) or (compact.isdigit() and 4 <= len(compact) <= 25):
+                    out["vin"] = compact
+            if not out.get("lot_number_html") and "lot" in label:
+                out["lot_number_html"] = val.strip("#").strip()
+            # Icon-based VIN: newer SBX pages use vin.*.svg icon instead of a text label.
+            if not out.get("vin") and not title_el:
+                icon_img = data_item.find("img", src=re.compile(r"/vin\.", re.I))
+                if icon_img:
+                    # Collect only non-empty text nodes (skips img alt attributes)
+                    val_text = "".join(t.strip() for t in val_el.strings if t.strip())
+                    compact = re.sub(r"[\s\-]+", "", val_text).upper()
+                    if re.match(r"^[A-HJ-NPR-Z0-9]{4,25}$", compact):
+                        out["vin"] = compact
+
     # ── Full description from rendered page sections ───────────────────────────
     desc = _build_full_description(soup, bullets)
     if desc:
@@ -503,7 +535,7 @@ def merge_card_and_detail(card: dict[str, Any], detail: dict[str, Any]) -> dict[
         "int_color": detail.get("int_color"),
         "engine_spec": detail.get("engine_spec"),
         "transmission": detail.get("transmission"),
-        "lot_number": detail.get("listing_id_num"),
+        "lot_number": detail.get("lot_number_html") or detail.get("listing_id_num"),
         "listing_description": detail.get("listing_description"),
         "bid_count": detail.get("bid_count"),
         "selling_date": detail.get("selling_date"),

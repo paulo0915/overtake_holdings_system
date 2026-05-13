@@ -69,6 +69,16 @@ def insert_auction_records(records: list[dict]) -> int:
     if not valid:
         return 0
 
+    # Deduplicate by listing_url within the batch — Postgres raises an error when
+    # two rows in the same upsert command share the conflict key. Last occurrence wins.
+    seen_urls: dict[str, dict] = {}
+    for r in valid:
+        seen_urls[r["listing_url"]] = r
+    dupes = len(valid) - len(seen_urls)
+    if dupes:
+        logger.warning("Dropped %s within-batch duplicate listing_url(s) before upsert", dupes)
+    valid = list(seen_urls.values())
+
     inserted = 0
     for i in range(0, len(valid), AUCTION_BATCH_SIZE):
         batch = valid[i:i + AUCTION_BATCH_SIZE]

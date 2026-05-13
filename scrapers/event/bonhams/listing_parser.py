@@ -41,7 +41,7 @@ _YEAR_LEADING_RE = re.compile(r"^(?P<year>(?:19|20)\d{2})\b\s+(?P<rest>.+)$")
 # yielding VINs like ``WP0ZZZ96ZPS470173ENGINENO`` (see P1 §1.2 bug report).
 # ``[A-Z0-9\-*/]`` with no space stops at the first whitespace boundary.
 _CHASSIS_RE = re.compile(
-    r"Chassis\s*(?:no\.?|Number)\s*[:.]?\s*\*?([A-Z0-9][A-Z0-9\-/]{4,24})",
+    r"(?:Chassis\s*(?:no\.?|Number)|VIN)\s*[:.#]?\s*\*?([A-Z0-9][A-Z0-9\-./]{2,24})",
     re.I,
 )
 _VIN_LIKE_RE = re.compile(r"^[A-HJ-NPR-Z0-9]{17}$", re.I)
@@ -81,10 +81,12 @@ _EXT_COLOR_RE = re.compile(
 
 # Interior colour — ``<colour> leather/upholstery/hide``. Limit the head-word
 # to short colour-like phrases (≤3 words) to avoid false positives like
-# ``Finished in factory Black with Tan``.
+# ``Finished in factory Black with Tan``. Case-insensitive so "TAN leather"
+# and "tan leather" both match.
 _INT_COLOR_RE = re.compile(
-    r"\b([A-Z][a-z]+(?:\s+[a-z]+){0,2})\s+"
+    r"\b([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\s+"
     r"(?:leather|upholstery|hide|cloth|vinyl)\b",
+    re.IGNORECASE,
 )
 
 
@@ -250,8 +252,8 @@ def extract_vin_from_title_or_desc(sdesc: str, desc_text: str) -> str | None:
         candidate = re.sub(r"\s+", "", m.group(1)).upper()
         if _VIN_LIKE_RE.match(candidate):
             return candidate
-        # Some older cars have non-17-char chassis numbers — still return them.
-        if 5 <= len(candidate) <= 25:
+        # Vintage/short chassis numbers (e.g. "1175", "418") — accept from 3 chars.
+        if 3 <= len(candidate) <= 25:
             return candidate
     return None
 
@@ -259,7 +261,7 @@ def extract_vin_from_title_or_desc(sdesc: str, desc_text: str) -> str | None:
 # Bonhams URL slugs embed the chassis number as: …chassis-no-<value>(-engine-no-…|end)
 # Example: /auction/31711/lot/115/1985-ferrari-testarossa-coupe-chassis-no-zffta17b000055031-engine-no-f113a-00060/
 _URL_CHASSIS_RE = re.compile(
-    r"chassis-no-([^/]+?)(?=-engine-no-|-frame-no-|-reg-no-|/?$)",
+    r"(?:chassis-no|vin)-([^/]+?)(?=-engine-no-|-frame-no-|-reg-no-|/?$)",
     re.IGNORECASE,
 )
 
@@ -283,7 +285,7 @@ def extract_vin_from_url(listing_url: str) -> str | None:
     if not m:
         return None
     candidate = m.group(1).upper()
-    if 5 <= len(candidate) <= 25:
+    if 3 <= len(candidate) <= 25:
         return candidate
     return None
 

@@ -43,7 +43,7 @@ def build_record(
         "Make": flat.get("make"),
         "Model": flat.get("model"),
         "VIN": pick("vin"),
-        "Mileage_mi": pick("mileage_mi"),
+        "Mileage_mi": pick("mileage_mi") if pick("mileage_mi") is not None else 0,
         "Ext_color": pick("ext_color"),
         "Int_color": pick("int_color"),
         "Engine_spec": pick("engine_spec"),

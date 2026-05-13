@@ -76,6 +76,7 @@ def build_record(
         "Image_url": image_url,
         "Listing_url": flat.get("listing_url"),
         "Source": "cars.com",
+        "Listing_segment": "used",
         "Listing_description": detail.get("description"),
         "Scraped_at": scraped_at,
     }

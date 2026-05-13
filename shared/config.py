@@ -23,7 +23,7 @@ MAX_PRICE_USD = int(os.getenv("MAX_PRICE_USD", "20000000"))  # $20 M
 
 # === Vehicle filter ===
 VEHICLE_FILTER_FILE = _PROJECT_ROOT / os.getenv(
-    "VEHICLE_FILTER_FILE", "client_requirements/markets to track closely.xlsx"
+    "VEHICLE_FILTER_FILE", "assets/markets to track closely.xlsx"
 )
 
 # === FX ===

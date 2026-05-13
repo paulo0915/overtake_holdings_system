@@ -1,9 +1,19 @@
 """Hagerty — merge list summary + detail parse, FX, AUCTION_COLUMNS mapping."""
 
 import logging
+import re
 
 from shared.fx_converter import FXConverter
 from shared.normalizer import is_non_car_make
+
+# Titles containing these phrases are parts/engines/memorabilia — not real cars.
+_NON_CAR_TITLE_RE = re.compile(
+    r"\b(engine(\s+lot)?|gearbox|transaxle|transmission\s+lot|parts?\s+lot"
+    r"|pedal\s+car|toy\s+car|scale\s+model|automobilia|memorabilia"
+    r"|bodywork|chassis\s+only|rolling\s+chassis|bare\s+chassis"
+    r"|wheels?\s+set|wheel\s+lot|tire\s+lot)\b",
+    re.IGNORECASE,
+)
 
 from .config import HAGERTY_MARKETPLACE_BASE
 from .listing_parser import as_year, location_to_country, sold_status_from_flags
@@ -33,7 +43,16 @@ async def build_records(
         seen.add(aid)
 
         title = s.get("title") or ""
+        # Drop non-vehicle listings: Hagerty uses year 0 / "0000" as a
+        # placeholder for engines / parts / lots with no real model year.
+        parsed_year = as_year(s.get("year"))
+        if parsed_year is None or parsed_year < 1886:
+            skipped["filter"] += 1
+            continue
         if is_non_car_make(s.get("make")):
+            skipped["filter"] += 1
+            continue
+        if _NON_CAR_TITLE_RE.search(title):
             skipped["filter"] += 1
             continue
         if vehicle_filter and title:

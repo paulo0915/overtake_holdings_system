@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html as html_lib
+import json
 import re
 from typing import Any
 
@@ -11,6 +12,16 @@ from bs4 import BeautifulSoup
 from shared.normalizer import country_code_to_name, normalize_engine_spec, normalize_transmission
 
 from .config import SITE_ORIGIN
+
+# Lot titles that indicate non-vehicle items reaching the auction results.
+# Checked as whole words (case-insensitive) against the lot title.
+_NON_VEHICLE_TITLE_RE = re.compile(
+    r"\b(?:go[- ]?kart|karting|painting|artwork|sculpture|poster|"
+    r"lithograph|memorabilia|diecast|luggage|briefcase|suitcase|"
+    r"enamel\s+sign|advertising\s+sign|trophy|signage|"
+    r"model\s+car|scale\s+model)\b",
+    re.I,
+)
 
 
 def _abs_url(path: str | None) -> str | None:
@@ -280,10 +291,15 @@ def _html_to_text(html: str | None) -> str | None:
     return txt[:200_000] if txt else None
 
 
-def parse_search_row(row: dict[str, Any]) -> dict[str, Any]:
-    """One element from ``props.searchResults.data``."""
+def parse_search_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    """One element from ``props.searchResults.data``.
+
+    Returns ``None`` for non-vehicle lots (artwork, memorabilia, go-karts…).
+    """
     rid = str(row.get("id") or "").strip()
     title = (row.get("title") or "").strip()
+    if _NON_VEHICLE_TITLE_RE.search(title):
+        return None
     make = (row.get("make") or "").strip() or None
     year_s = row.get("year")
     year, make2, model = split_title(title, make, str(year_s) if year_s is not None else None)
@@ -329,13 +345,29 @@ def parse_search_row(row: dict[str, Any]) -> dict[str, Any]:
 
 def listing_payload_from_document_html(html: str | None) -> dict[str, Any] | None:
     """
-    When Inertia partial JSON is blocked (403), use the full document HTML we already fetched.
+    Extract Inertia page props from the full document HTML.
+
+    Primary path: parse the ``data-page`` JSON attribute on ``<div id="app">``
+    — this contains the complete Inertia props including ``listing.description``.
+    Fallback: ``og:description`` meta tag (short excerpt only).
 
     Returns the same outer shape as an Inertia response: ``{"props": {"listing": {...}}}``.
     """
     if not html or not str(html).strip():
         return None
     soup = BeautifulSoup(html, "lxml")
+
+    # Primary: Inertia embeds full page props in data-page on the app div.
+    app_div = soup.find("div", id="app")
+    if app_div and app_div.get("data-page"):
+        try:
+            props_data = json.loads(html_lib.unescape(str(app_div["data-page"])))
+            if isinstance(props_data, dict) and isinstance(props_data.get("props"), dict):
+                return props_data
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Fallback: og:description / meta description (truncated excerpt).
     desc = None
     og = soup.find("meta", property="og:description")
     if og and og.get("content"):

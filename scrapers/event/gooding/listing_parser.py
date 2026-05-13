@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any
 
-from shared.normalizer import extract_description_fields
+from shared.normalizer import extract_description_fields, normalize_vin
 
 from .config import IMAGE_CDN_BASE, SITE_ORIGIN
 
@@ -183,6 +183,151 @@ def parse_transmission_from_specs(specs: list[str]) -> str | None:
     return None
 
 
+_MILEAGE_RE = re.compile(
+    r"(?:^|[\s(])(\d{1,7})\s*(?:original|actual|indicated|documented|showing|approximately|approx\.?)?\s*(?:mi\.?|miles?)\b",
+    re.I,
+)
+_KM_RE = re.compile(r"(?:^|[\s(])(\d{1,7})\s*(?:km|kilometers?|kilometres?)\b", re.I)
+
+
+_CHASSIS_SPEC_RE = re.compile(
+    r"^Chassis\s*(?:No\.?|Number|#)?\s*[:\-]?\s*(.+)$",
+    re.I,
+)
+
+
+def _chassis_from_specs(item: dict[str, Any]) -> str | None:
+    """Extract chassis number from structured field or specifications/highlights list."""
+    # Structured field first (some lots have it)
+    for key in ("chassis", "chassisNumber", "chassisNo", "vin", "serialNumber"):
+        val = item.get(key)
+        if val and isinstance(val, str) and val.strip():
+            raw = val.strip()
+            v = normalize_vin(raw)
+            if v:
+                return v
+            # Vintage chassis like "0202 A" have a space — try compacted form
+            compact = re.sub(r"\s+", "", raw).upper()
+            if compact:
+                v = normalize_vin(compact)
+                if v:
+                    return v
+            # Return raw — e.g. "0202 A", "J-386" don't pass VIN validation
+            if len(raw) >= 2:
+                return raw
+
+    # Scan specifications and highlights lines for "Chassis No. XYZ"
+    for field in ("specifications", "highlights"):
+        for line in (item.get(field) or []):
+            if not isinstance(line, str):
+                continue
+            m = _CHASSIS_SPEC_RE.match(line.strip())
+            if m:
+                raw = m.group(1).strip()
+                # Normalize: strip punctuation noise, try as VIN/chassis
+                v = normalize_vin(re.sub(r"[\s*]+", "", raw).upper())
+                if v:
+                    return v
+                # For short chassis like "97" or "1215 GT" normalize_vin may reject
+                # (too short or all-digit). Return the raw cleaned string directly.
+                cleaned = re.sub(r"\s+", " ", raw).strip()
+                if cleaned:
+                    return cleaned
+    return None
+
+
+_SPEC_COLON_RE = re.compile(r"^[^:]{2,50}:\s*(.+)$")
+_INTERIOR_STRIP_RE = re.compile(
+    r"\s*\b(?:leather|alcantara|suede|cloth|fabric|upholstery)\b.*$", re.I,
+)
+
+
+def _colors_from_specs(specs: list[str]) -> tuple[str | None, str | None]:
+    """Scan structured specifications lines for exterior and interior color.
+
+    Handles Gooding's typical formats:
+      ``Exterior Color: Rosso Corsa``
+      ``Interior: Black Leather``
+      ``Presentation: Black Leather Over Red Carpet``
+    """
+    ext_color: str | None = None
+    int_color: str | None = None
+    for line in specs:
+        if not isinstance(line, str) or not line.strip():
+            continue
+        ll = line.lower()
+        if not ext_color:
+            if re.match(r"exterior\s*(?:colou?r)?", ll):
+                m = _SPEC_COLON_RE.match(line)
+                if m:
+                    ext_color = m.group(1).strip()
+            elif re.match(r"(?:painted|finish(?:ed)?|colour?r?)\s*:", ll):
+                m = _SPEC_COLON_RE.match(line)
+                if m:
+                    ext_color = m.group(1).strip()
+        if not int_color:
+            if re.match(r"interior\s*(?:colou?r)?", ll):
+                m = _SPEC_COLON_RE.match(line)
+                if m:
+                    val = _INTERIOR_STRIP_RE.sub("", m.group(1)).strip()
+                    if val:
+                        int_color = val
+            elif re.match(r"upholstery\s*:", ll):
+                m = _SPEC_COLON_RE.match(line)
+                if m:
+                    val = m.group(1).strip()
+                    if val:
+                        int_color = val
+            elif not int_color:
+                # "Black leather interior" / "Tan Alcantara upholstery"
+                mi = re.match(
+                    r"([A-Za-z][A-Za-z\s\-]{1,30}?)\s+"
+                    r"(?:leather|alcantara|suede|cloth|fabric)\s+"
+                    r"(?:interior|upholstery|trim)",
+                    line, re.I,
+                )
+                if mi:
+                    int_color = mi.group(1).strip()
+    return ext_color, int_color
+
+
+def _parse_mileage_from_specs(specs: list[str], description: str = "") -> int | None:
+    """Extract mileage from specifications lines or description prose."""
+    # Scan specification lines first for "X miles" or "X km" patterns.
+    for line in specs:
+        if not isinstance(line, str):
+            continue
+        text = re.sub(r"(?<=\d),(?=\d{3}\b)", "", line)
+        m = _MILEAGE_RE.search(text)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                pass
+        m = _KM_RE.search(text)
+        if m:
+            try:
+                return round(int(m.group(1)) * 0.621371)
+            except ValueError:
+                pass
+    # Fall back to description prose.
+    if description:
+        text = re.sub(r"(?<=\d),(?=\d{3}\b)", "", description)
+        m = _MILEAGE_RE.search(text)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                pass
+        m = _KM_RE.search(text)
+        if m:
+            try:
+                return round(int(m.group(1)) * 0.621371)
+            except ValueError:
+                pass
+    return None
+
+
 def _join_description(item: dict[str, Any]) -> str | None:
     highlights = [h for h in (item.get("highlights") or []) if isinstance(h, str) and h.strip()]
     specs = [s for s in (item.get("specifications") or []) if isinstance(s, str) and s.strip()]
@@ -234,18 +379,56 @@ def parse_lot_page_data(payload: dict[str, Any], *, path: str) -> dict[str, Any]
 
     transmission = parse_transmission_from_specs(item.get("specifications") or [])
 
-    # Extract colors from the combined description (highlights + specifications text).
     description_text = _join_description(item)
-    desc_fields = extract_description_fields(description_text or "") if description_text else {}
-    ext_color = desc_fields.get("ext_color")
-    int_color = desc_fields.get("int_color")
+
+    # Extract colors: structured specs list first (most reliable for Gooding),
+    # then fall back to description-text extraction.
+    ext_color, int_color = _colors_from_specs(item.get("specifications") or [])
+    if not ext_color or not int_color:
+        desc_fields = extract_description_fields(description_text or "") if description_text else {}
+        ext_color = ext_color or desc_fields.get("ext_color")
+        int_color = int_color or desc_fields.get("int_color")
+
+    mileage_mi = _parse_mileage_from_specs(item.get("specifications") or [], description_text or "")
 
     sale_price = lot.get("salePrice")
+    try:
+        if sale_price is not None and float(sale_price) <= 1.0:
+            sale_price = None
+    except (TypeError, ValueError):
+        pass
     low = lot.get("lowEstimate")
     high = lot.get("highEstimate")
 
     slug = lot.get("slug") or path.rsplit("/", 1)[-1]
     listing_url = f"{SITE_ORIGIN}{path}/"
+
+    # Engine spec: Gooding's ``engine`` CMS field stores the ENGINE SERIAL number for
+    # vintage lots (e.g. "1825", "198.980.10.9500068") — NOT a displacement description.
+    # The actual engine description is always specifications[0], e.g.:
+    #   "5,733 CC DOHC V-10 Engine" / "2,953 CC SOHC V-12 Engine"
+    # Strategy: find the first spec/highlight line that contains an engine-describing
+    # keyword (displacement unit, cylinder config, etc.) and use it directly.
+    _ENGINE_LINE_RE = re.compile(
+        r"\b(?:cc|cyl(?:inder)?|litre?|liter|cubic|v[-\s]?\d{1,2}\b|inline|straight|flat[-\s]?\d|"
+        r"electric|hybrid|turbo|supercharg|engine\b)",
+        re.I,
+    )
+    from shared.normalizer import extract_description_fields as _edf
+    engine_spec: str | None = None
+    for _line in (item.get("specifications") or []) + (item.get("highlights") or []):
+        if not isinstance(_line, str):
+            continue
+        if _ENGINE_LINE_RE.search(_line):
+            engine_spec = _line.strip()
+            break
+    if not engine_spec:
+        specs_text = " ".join(
+            s for s in (item.get("specifications") or []) + (item.get("highlights") or [])
+            if isinstance(s, str)
+        )
+        if specs_text:
+            engine_spec = _edf(specs_text).get("engine")
 
     return {
         "record_id": f"gooding_{slug}",
@@ -258,12 +441,12 @@ def parse_lot_page_data(payload: dict[str, Any], *, path: str) -> dict[str, Any]
         "model": model,
         "item_type": item_type or None,
         "item_typename": item_typename or None,
-        "vin": item.get("chassis") or None,
-        "engine_spec": item.get("engine") or None,
+        "vin": _chassis_from_specs(item),
+        "engine_spec": engine_spec,
         "transmission": transmission,
         "ext_color": ext_color,
         "int_color": int_color,
-        "mileage_mi": None,  # Not provided as structured data.
+        "mileage_mi": mileage_mi,
         "lot_number": str(lot.get("lotNumber")) if lot.get("lotNumber") is not None else None,
         "auction_name": auction_name,
         "currency": currency,

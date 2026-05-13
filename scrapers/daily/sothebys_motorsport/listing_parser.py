@@ -41,7 +41,8 @@ _VIN_RE = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
 _MAKE_NOISE_PREFIX = re.compile(
     r"^(?:"
     r"(?:#\d+/\d+\s+)"                          # serial prefix like "#285/1963"
-    r"|(?:[A-Za-z\-]+\s+)?[\d,]+[kK]?-?(?:Mile|Mi|Miles)\s+"  # mileage prefix
+    r"|(?:[A-Za-z\-]+\s+)?[\d,]+[kK]?\s*[-–]\s*(?:Mile|Mi|Miles)\s+"  # "300 - Mile" / "300-Mile"
+    r"|(?:[A-Za-z\-]+\s+)?[\d,]+[kK]?-?(?:Mile|Mi|Miles)\s+"  # legacy: no-space hyphen
     r"|(?:Original[- ]Owner\s+)"               # ownership prefix
     r"|(?:Rare\s+)"                             # marketing noise
     r")+",
@@ -71,7 +72,7 @@ def _extract_vin(text: str) -> str | None:
 
 
 def _mileage_from_model_string(model: str) -> int | None:
-    """Parse mileage only when the model string explicitly mentions miles/mi."""
+    """Parse mileage when the model string explicitly mentions miles/mi."""
     if not model or not re.search(r"\bmiles?\b|\bmi\b", model, re.IGNORECASE):
         return None
     best: int | None = None
@@ -84,6 +85,30 @@ def _mileage_from_model_string(model: str) -> int | None:
         if val is not None:
             best = val
     return best
+
+
+def _mileage_from_description(desc: str) -> int | None:
+    """Extract mileage from free-text description."""
+    if not desc:
+        return None
+    text = re.sub(r"(?<=\d),(?=\d{3}\b)", "", desc)
+    # "11,000 original miles", "45,000 actual miles", "22,000 miles"
+    m = re.search(
+        r"(?:^|[\s(])(\d{1,7})\s*(?:original|actual|indicated|documented|showing|approximately|approx\.?)?\s*(?:mi\.?|miles?)\b",
+        text, re.I,
+    )
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    m = re.search(r"(?:^|[\s(])(\d{1,7})\s*(?:km|kilometers?|kilometres?)\b", text, re.I)
+    if m:
+        try:
+            return round(int(m.group(1)) * 0.621371)
+        except ValueError:
+            pass
+    return None
 
 
 def location_to_country(
@@ -205,6 +230,8 @@ def parse_summary_from_api_row(raw: dict[str, Any]) -> dict[str, Any]:
 
     fields = extract_description_fields(text_for_specs) if text_for_specs else {}
     mileage = _mileage_from_model_string(model) if isinstance(model, str) else None
+    if mileage is None and text_for_specs:
+        mileage = _mileage_from_description(text_for_specs)
 
     return {
         "auction_id": auction_id,
@@ -274,10 +301,56 @@ def merge_detail_page_props(summary: dict[str, Any], page_props: dict[str, Any] 
 
     odometer = vd.get("odometer")
     if isinstance(odometer, dict):
-        mi = odometer.get("readingMiles")
+        # Structured: {readingMiles, readingKm, unit, …}
+        mi = odometer.get("readingMiles") or odometer.get("miles") or odometer.get("value")
+        km = odometer.get("readingKm") or odometer.get("km") or odometer.get("kilometers")
+        unit = str(odometer.get("unit") or odometer.get("units") or "").lower()
         if mi is not None:
             try:
                 out["mileage_mi"] = int(mi)
+            except (TypeError, ValueError):
+                pass
+        elif km is not None:
+            try:
+                out["mileage_mi"] = round(int(km) * 0.621371)
+            except (TypeError, ValueError):
+                pass
+        elif odometer.get("reading") is not None:
+            try:
+                raw_val = int(odometer["reading"])
+                out["mileage_mi"] = round(raw_val * 0.621371) if "km" in unit else raw_val
+            except (TypeError, ValueError):
+                pass
+    elif odometer is not None:
+        # Flat scalar (plain integer or string like "2402" or "2402 miles")
+        try:
+            raw_str = str(odometer).strip()
+            km_match = re.search(r"(\d[\d,]*)\s*(?:km|kilometers?|kilometres?)", raw_str, re.I)
+            mi_match = re.search(r"(\d[\d,]*)\s*(?:mi\.?|miles?)", raw_str, re.I)
+            bare_match = re.match(r"^[\d,]+$", raw_str.replace(",", ""))
+            if km_match:
+                out["mileage_mi"] = round(int(km_match.group(1).replace(",", "")) * 0.621371)
+            elif mi_match:
+                out["mileage_mi"] = int(mi_match.group(1).replace(",", ""))
+            elif bare_match:
+                out["mileage_mi"] = int(raw_str.replace(",", ""))
+        except (TypeError, ValueError):
+            pass
+
+    # Also try flat vd-level mileage keys when odometer is absent.
+    if out.get("mileage_mi") is None:
+        for mk in ("mileage", "miles", "odometer_reading", "odometerReading"):
+            raw_mi = vd.get(mk)
+            if raw_mi is None:
+                continue
+            try:
+                raw_str = str(raw_mi).strip()
+                km_m = re.search(r"(\d[\d,]*)\s*(?:km|kilometers?|kilometres?)", raw_str, re.I)
+                if km_m:
+                    out["mileage_mi"] = round(int(km_m.group(1).replace(",", "")) * 0.621371)
+                else:
+                    out["mileage_mi"] = int(raw_str.replace(",", ""))
+                break
             except (TypeError, ValueError):
                 pass
 
@@ -303,8 +376,10 @@ def merge_detail_page_props(summary: dict[str, Any], page_props: dict[str, Any] 
     if blob.strip():
         if not out.get("vin"):
             out["vin"] = _extract_vin(blob)
-        if not out.get("mileage_mi"):
+        if out.get("mileage_mi") is None:
             mm = _mileage_from_model_string(str(vd.get("model") or ""))
+            if mm is None:
+                mm = _mileage_from_description(blob)
             if mm is not None:
                 out["mileage_mi"] = int(mm)
         if not out.get("engine_spec") or not out.get("ext_color") or not out.get("int_color"):

@@ -77,7 +77,7 @@ _CLASSIFIEDS_SOURCES = [
     ("cg",          ["used", "new"],"CarGurus"),
     ("tc",          ["used", "new"],"TrueCar"),
     ("atca",        ["used", "new"],"AutoTrader.ca"),
-    ("as24",        ["used", "new", "all"], "AutoScout24"),
+    ("as24",        ["used", "new"],         "AutoScout24"),
 ]
 
 
@@ -127,18 +127,23 @@ def _reset_db() -> None:
     """Truncate both tables (non-interactive - skip confirm prompt)."""
     from shared.db import get_client
     client = get_client()
+    # Delete in small sub-batches to avoid httpx URL-too-long errors when the
+    # IN(...) clause contains hundreds of long listing URLs.
+    SUB_BATCH = 50
     for table in ("auctions", "classifieds"):
         print(f"  Clearing '{table}' ...", end=" ", flush=True)
         deleted = 0
         while True:
-            batch = client.table(table).select("listing_url").limit(1000).execute()
+            batch = client.table(table).select("listing_url").limit(200).execute()
             rows = batch.data or []
             if not rows:
                 break
             urls = [r["listing_url"] for r in rows if r.get("listing_url")]
             if not urls:
                 break
-            client.table(table).delete().in_("listing_url", urls).execute()
+            for i in range(0, len(urls), SUB_BATCH):
+                chunk = urls[i:i + SUB_BATCH]
+                client.table(table).delete().in_("listing_url", chunk).execute()
             deleted += len(urls)
         print(f"{deleted:,} rows deleted.")
 
@@ -190,6 +195,14 @@ def main() -> None:
         help="Override --max-pages for Gooding only (e.g. --gooding-pages 10)",
     )
     parser.add_argument(
+        "--sbx-pages", type=int, default=None,
+        help="Override --max-pages for SBX Cars (lot count, not pages; e.g. --sbx-pages 30)",
+    )
+    parser.add_argument(
+        "--worldwide-pages", type=int, default=None,
+        help="Override --max-pages for Worldwide Auctioneers (lot count; e.g. --worldwide-pages 50)",
+    )
+    parser.add_argument(
         "--no-filter", action="store_true",
         help="Disable vehicle filter for all scrapers (debugging only)",
     )
@@ -216,6 +229,10 @@ def main() -> None:
     source_page_overrides: dict[str, int] = {}
     if args.gooding_pages is not None:
         source_page_overrides["gooding"] = args.gooding_pages
+    if args.sbx_pages is not None:
+        source_page_overrides["sbx"] = args.sbx_pages
+    if args.worldwide_pages is not None:
+        source_page_overrides["worldwide"] = args.worldwide_pages
 
     # -- 1. Optional DB reset ---------------------------------------------
     if args.reset:

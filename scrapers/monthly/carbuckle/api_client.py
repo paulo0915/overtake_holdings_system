@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from .config import COLLECTION, FIREBASE_PROJECT, PER_PAGE, TYPESENSE_API_KEY, TYPESENSE_HOST
+from .config import BASE_URL, COLLECTION, FIREBASE_PROJECT, PER_PAGE, TYPESENSE_API_KEY, TYPESENSE_HOST
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,19 @@ async def fetch_firestore_doc(client: httpx.AsyncClient, listing_id: str) -> dic
     wait=wait_exponential(multiplier=1, min=2, max=20),
     retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadTimeout)),
 )
+async def fetch_listing_html(client: httpx.AsyncClient, path: str) -> str | None:
+    """Fetch the rendered HTML of a Carbuckle listing page (VIN fallback)."""
+    url = f"{BASE_URL}/listing/{path.lstrip('/')}"
+    try:
+        r = await client.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code == 200:
+            return r.text
+        logger.debug("Carbuckle listing HTML %s → HTTP %s", path, r.status_code)
+    except Exception as e:
+        logger.debug("Carbuckle listing HTML fetch failed for %s: %s", path, e)
+    return None
+
+
 async def fetch_page(client: httpx.AsyncClient, page: int) -> dict[str, Any]:
     """Fetch one page of sold listings from the Typesense search API."""
     params = {**_QUERY_PARAMS, "page": str(page)}

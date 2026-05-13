@@ -198,46 +198,48 @@ _VIN_PLACEHOLDERS = frozenset({
 
 
 def normalize_vin(raw: str | None) -> str | None:
-    """Return a valid 17-char VIN or ``None``.
+    """Normalize a VIN or chassis number string.
 
-    Valid = matches ISO 3779 format (``[A-HJ-NPR-Z0-9]{17}`` — 17 chars,
-    alphanumeric, excluding ``I``/``O``/``Q``).
+    Standard 17-char VINs (ISO 3779) are uppercased and returned as-is.
+    All other chassis/serial numbers (pre-1981, race cars, short serials like
+    ``418``) are returned with only truly invalid characters removed — case is
+    preserved and no minimum length is enforced.
 
-    Everything else (placeholders ``.``, ``001``, ``213``; chassis numbers
-    like ``CSX3015``, ``DK28``, ``J386``; concat bugs like
-    ``<vin>ENGINENO<engineno>``) returns ``None``. This keeps the VIN
-    column decodable by standard VIN tools — race-car / pre-1981 chassis
-    tags belong in a separate ``Chassis_number`` column, not VIN.
-
-    Side effects:
-      * Strips surrounding whitespace.
-      * Uppercases (VINs are case-insensitive but standard form is upper).
-      * Trims an accidental ``ENGINENO<engine-no>`` suffix (Bonhams parser
-        bug — defensive catch here so bad rows still produce a clean VIN).
+    Returns ``None`` only for empty strings, known placeholders, or strings
+    longer than 25 chars after cleaning.
     """
     if raw is None:
         return None
-    s = str(raw).strip().upper()
-    if not s or s in _VIN_PLACEHOLDERS:
+    s = str(raw).strip()
+    if not s or s.upper() in _VIN_PLACEHOLDERS:
         return None
 
-    # Bonhams-style ``<vin>ENGINENO<engineno>`` concat — defensive strip.
-    # The scraper fix in the Bonhams parser should prevent this upstream
-    # but we also catch it here in case any rows already landed in the DB
-    # or a new source has the same join bug.
-    if "ENGINENO" in s:
-        s = s.split("ENGINENO", 1)[0].strip()
+    # Bonhams-style ``<vin>ENGINENO<engineno>`` concat — strip on uppercase match.
+    if "ENGINENO" in s.upper():
+        s = s[:s.upper().index("ENGINENO")].strip()
         if not s:
             return None
 
-    if _VIN_RE.match(s):
-        # WMI (first 3 chars) never starts with '0' in any real VIN.
-        # Zero-prefixed strings are internal inventory IDs from dealers /
-        # auction platforms (CarGurus, Cars.com, Barrett-Jackson, SBX Cars).
-        if s[0] == "0":
+    # Standard 17-char VIN: uppercase and validate.
+    s_up = re.sub(r"\s+", "", s).upper()
+    if _VIN_RE.match(s_up):
+        # WMI never starts with '0' in real VINs — zero-prefixed = dealer inventory ID.
+        if s_up[0] == "0":
             return None
-        return s
-    return None
+        return s_up
+
+    # Partially-masked 17-char VINs (e.g. "WP0ZZZ99ZSS******").
+    if len(s_up) == 17 and "*" in s_up and re.match(r"^[A-HJ-NPR-Z0-9*]{17}$", s_up):
+        return s_up
+
+    # All other chassis/serial numbers: uppercase, strip truly strange chars.
+    # Keep letters, digits, hyphen, dot, slash.
+    cleaned = re.sub(r"[^a-zA-Z0-9\-./]", "", s).strip("-./").upper()
+    if not cleaned or cleaned in _VIN_PLACEHOLDERS:
+        return None
+    if len(cleaned) > 25:
+        return None
+    return cleaned
 
 
 def normalize_transmission(raw: str | None) -> str | None:
@@ -284,6 +286,41 @@ def unescape(text: str | None) -> str | None:
     return html_lib.unescape(text)
 
 
+# Matches any HTML/XML tag, including self-closing ones like <br/>, <hr>, etc.
+_HTML_TAG_RE = re.compile(r"<[^>]+>", re.DOTALL)
+# Collapse runs of whitespace (spaces, tabs, non-breaking spaces) to a single space,
+# but preserve intentional newlines so paragraph structure survives.
+_INLINE_WS_RE = re.compile(r"[ \t ]+")
+# Collapse 3+ consecutive newlines to at most 2.
+_EXCESS_NL_RE = re.compile(r"\n{3,}")
+
+
+def strip_html(text: str | None) -> str | None:
+    """Remove all HTML tags from *text* and normalise whitespace.
+
+    Converts ``<br>``, ``<p>``, ``<li>`` etc. to newlines before stripping so
+    that paragraph / list structure is preserved as readable plain text rather
+    than running every sentence together.
+    """
+    if not text:
+        return text
+    s = str(text)
+    # Skip entirely if the string contains no tag-like content.
+    if "<" not in s:
+        return s
+    # Turn block/line-break tags into newlines before stripping everything else.
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)
+    s = re.sub(r"</?(?:p|div|li|tr|td|th|h[1-6]|blockquote|hr|section|article)[^>]*>",
+               "\n", s, flags=re.I)
+    s = _HTML_TAG_RE.sub("", s)
+    s = html_lib.unescape(s)
+    # Normalise inline whitespace, then tidy up newlines.
+    s = _INLINE_WS_RE.sub(" ", s)
+    s = "\n".join(line.strip() for line in s.splitlines())
+    s = _EXCESS_NL_RE.sub("\n\n", s)
+    return s.strip() or None
+
+
 _YEAR_RE = re.compile(
     r'\b(1[89]\d{2}|20\d{2})(?![\d,]*\s*k?\s*-\s*(?:mile|km|kilometer))\b',
     re.IGNORECASE,
@@ -310,6 +347,9 @@ NON_CAR_MAKES: frozenset[str] = frozenset({
     "Riva", "Chris-Craft", "Midnight Express", "Sea Ray", "Bertram",
     "Hatteras", "Sunseeker", "Azimut", "Ferretti", "Pershing",
     "Princess", "Beneteau", "Catalina", "Malibu",
+    "Cigarette", "Donzi", "Fountain", "Cobalt", "Chaparral",
+    "Wellcraft", "Regal", "Four Winns", "Chaparral",
+    "Grand Banks", "Carver", "Viking", "Cabo", "Luhrs",
     # ── Commercial trucks ──────────────────────────────────────────────────
     "Kenworth", "Peterbilt", "Mack", "Western Star", "Freightliner",
     # Note: "International" alone is ambiguous (pre-war cars exist), so we
@@ -319,6 +359,12 @@ NON_CAR_MAKES: frozenset[str] = frozenset({
     "Bedford",          # Bedford trucks/buses (not the historic Bedford car)
     "Blue Bird",
     "Thomas Built",
+    # ── Scooters / mopeds / go-karts / ATVs ───────────────────────────────
+    "Piaggio",          # Vespa/Piaggio scooters — not cars
+    "Vespa",
+    "Roketa",           # go-kart / ATV maker
+    "Kymco",
+    "TaoTao",
 })
 
 # Lowercase set for fast case-insensitive lookup.
@@ -338,7 +384,7 @@ _KNOWN_MAKES = [
     "Ferrari", "Lamborghini", "Porsche", "Bugatti", "McLaren", "Pagani",
     "Koenigsegg", "BMW", "Audi", "Ford", "Honda", "Acura", "Lexus",
     "Nissan", "Toyota", "Chevrolet", "Dodge", "Shelby", "Lancia",
-    "Maserati", "Bentley", "Jaguar", "Lotus",
+    "Maserati", "Bentley", "Jaguar", "Lotus", "Fiat",
     "Pontiac", "Plymouth", "AMC", "Saleen", "SSC", "Rimac",
     "Hennessey", "W Motors", "Czinger", "Lucid", "Tesla",
     "Bristol Cars", "Pininfarina",
@@ -346,6 +392,9 @@ _KNOWN_MAKES = [
 
 # Sorted longest-first so multi-word makes match before their single-word prefix.
 _KNOWN_MAKES_SORTED = sorted(_KNOWN_MAKES, key=lambda m: len(m), reverse=True)
+
+# Lowercase set for fast case-insensitive membership checks.
+_KNOWN_MAKES_LOWER: frozenset[str] = frozenset(m.lower() for m in _KNOWN_MAKES)
 
 # Canonical casing corrections keyed by lowercase variant.
 _MAKE_CASING = {
@@ -369,6 +418,8 @@ _MAKE_REMAP: dict[str, tuple[str, bool]] = {
     "mercedes": ("Mercedes-Benz", False),
     # "Mercedes Benz" (space, no hyphen) — normalise to canonical form.
     "mercedes benz": ("Mercedes-Benz", False),
+    # Revology builds continuation Mustangs — treat as Ford.
+    "revology": ("Ford", False),
 }
 
 
@@ -428,10 +479,11 @@ def normalize_make_model(
     if model_s.lower() in _PLACEHOLDER:
         model_s = ""
 
-    # ── Title fallback when make is still empty ───────────────────────────────
-    if not make_s and title:
+    # ── Title fallback when make is empty or not a recognised make ───────────
+    is_unknown_make = make_s and make_s.lower() not in _KNOWN_MAKES_LOWER and make_s.lower() not in _NON_CAR_MAKES_LOWER
+    if (not make_s or is_unknown_make) and title:
         inferred_make, inferred_model = parse_make_model_from_title(title)
-        if inferred_make:
+        if inferred_make and inferred_make.lower() in _KNOWN_MAKES_LOWER:
             make_s = inferred_make
             if not model_s:
                 model_s = inferred_model
@@ -453,9 +505,19 @@ def parse_make_model_from_title(title: str) -> tuple[str, str]:
             '', title, flags=re.IGNORECASE,
         ).strip()
 
-    for make in _KNOWN_MAKES:
+    for make in _KNOWN_MAKES_SORTED:
         if after_year.lower().startswith(make.lower()):
             model = after_year[len(make):].strip()
+            return (make, model)
+
+    # If no known make starts the string, scan further into the title.
+    # Handles titles like "c. 1967 Automobile S.C.A.F. Ferrari 330 P2"
+    # where the year-stripped prefix is not the make.
+    after_lower = after_year.lower()
+    for make in _KNOWN_MAKES_SORTED:
+        idx = after_lower.find(make.lower())
+        if idx > 0:
+            model = after_year[idx + len(make):].strip()
             return (make, model)
 
     parts = after_year.split(None, 1)

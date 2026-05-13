@@ -45,6 +45,7 @@ def build_record(
         "Image_url": flat.get("image_url"),
         "Listing_url": flat.get("listing_url"),
         "Source": source,
+        "Listing_segment": "new" if flat.get("is_new") else "used",
         # Prefer the VDP's ``fullDescription`` (the "More from the seller"
         # body). Fall back to the list-row's ``description.label`` (short,
         # ~143 chars) when the VDP has no extended notes — better than

@@ -231,7 +231,7 @@ class ListingParser:
         """Get all <li> text items from div.essentials."""
         items = []
         for li in essentials_div.find_all("li"):
-            text = li.get_text(strip=True)
+            text = li.get_text(separator=" ", strip=True)
             if text:
                 items.append(text)
         return items
@@ -259,7 +259,7 @@ class ListingParser:
 
         # Also check <li> items with "Key: Value" format
         for li in essentials_div.find_all("li"):
-            text = li.get_text(strip=True)
+            text = li.get_text(separator=" ", strip=True)
             if ":" in text:
                 parts = text.split(":", 1)
                 key = parts[0].strip().lower()
@@ -342,6 +342,17 @@ class ListingParser:
                     vin = match.group(1).strip()
                     if vin and vin.lower() not in ("n/a", "na", "none"):
                         return vin
+        # Explicit <a>-link fallback: BaT links chassis values to Google searches
+        essentials_div = soup.find("div", class_="essentials")
+        if essentials_div:
+            for li in essentials_div.find_all("li"):
+                li_text = li.get_text(separator=" ", strip=True)
+                if re.match(r'chassis\b', li_text, re.IGNORECASE):
+                    a_tag = li.find("a")
+                    if a_tag:
+                        val = a_tag.get_text(strip=True)
+                        if val and val.lower() not in ("n/a", "na", "none"):
+                            return val
         # Fallback: search listing content area only (not full page)
         content = (
             soup.select_one("div.post-excerpt")

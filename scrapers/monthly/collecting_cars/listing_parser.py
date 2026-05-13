@@ -7,9 +7,16 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
-from shared.normalizer import KM_TO_MILES, country_code_to_name, normalize_transmission
+from shared.normalizer import KM_TO_MILES, country_code_to_name, normalize_transmission, normalize_vin
 
 from .config import LISTING_BASE
+
+_NON_VEHICLE_TITLE_RE = re.compile(
+    r"\b(?:go[- ]?kart|karting|half[- ]scale|scale\s+model|model\s+car|"
+    r"painting|artwork|sculpture|poster|lithograph|memorabilia|"
+    r"diecast|trophy|signage|luggage|briefcase|suitcase)\b",
+    re.I,
+)
 
 
 def _parse_year(raw: str | int | None) -> int | None:
@@ -74,7 +81,14 @@ def _selling_date(dt: str | None) -> str | None:
 
 
 def parse_typesense_document(doc: dict[str, Any]) -> dict[str, Any]:
-    """Normalize a Typesense hit ``document`` into a summary row."""
+    """Normalize a Typesense hit ``document`` into a summary row.
+
+    Returns ``None`` for non-vehicle lots (trophies, scale models, artwork…).
+    """
+    title = (doc.get("title") or "").strip()
+    if _NON_VEHICLE_TITLE_RE.search(title):
+        return None
+
     feats = doc.get("features") or {}
     if not isinstance(feats, dict):
         feats = {}
@@ -105,7 +119,7 @@ def parse_typesense_document(doc: dict[str, Any]) -> dict[str, Any]:
         "int_color": None,
         "engine_spec": _engine(doc.get("powertrainName"), feats.get("fuelType")),
         "transmission": normalize_transmission(feats.get("transmission")),
-        "lot_number": None,  # CollectingCars is an online auction; numeric IDs are internal, not lot numbers
+        "lot_number": str(aid) if aid is not None else None,
         "currency": _currency_iso(doc.get("currencyCode")),
         "amount_native": int(price) if price is not None else None,
         "selling_date": _selling_date(doc.get("dtSoldUTC")),
@@ -202,35 +216,101 @@ def _normalize_vin(raw: str | None) -> str | None:
 
 def _parse_overview_list(soup: BeautifulSoup) -> dict[str, Any]:
     """
-    Car PDP uses ``ul.overviewList`` with icon URLs (mileage, transmission, paint, etc.).
+    Old PDP: ``ul.overviewList`` with icon URLs (mileage, transmission, paint, etc.).
+    New PDP: CSS-module rows ``div[class*=__row]`` with label/value spans.
+    Tries both structures and merges results.
     """
     out: dict[str, Any] = {}
-    ul = soup.select_one("ul.overviewList")
-    if not ul:
-        return out
 
-    for li in ul.find_all("li"):
-        img = li.find("img", src=True)
-        if not img:
+    # ── Old structure: ul.overviewList with icon <img> tags ──────────────────
+    ul = soup.select_one("ul.overviewList")
+    if ul:
+        for li in ul.find_all("li"):
+            img = li.find("img", src=True)
+            if not img:
+                continue
+            src = (img.get("src") or "").lower()
+            text = li.get_text(" ", strip=True)
+            if not text:
+                continue
+            if "icon-mileage" in src:
+                out["overview_mileage_raw"] = text
+                out["mileage_mi"] = _mileage_mi(text)
+            elif "icon-transmission" in src:
+                out["transmission"] = normalize_transmission(text)
+            elif "icon-direction" in src:
+                out["drive_side"] = text
+            elif "icon-paint" in src:
+                out["ext_color"] = text
+            elif "icon-interior" in src:
+                out["int_color"] = text
+            elif "icon-engine" in src or "icon-engin" in src:
+                out["engine_overview"] = text
+            elif "icon-lot" in src:
+                m = re.search(r"#?\s*(\d+)", text)
+                if m:
+                    out["lot_number"] = m.group(1)
+
+    # ── New structure: CSS-module rows with __label / __value spans ───────────
+    # Matches hashed class names like ``listingOverview-module-scss-module__xxx__row``
+    for row in soup.select("[class*=__row]"):
+        label_el = row.select_one("[class*=__label]")
+        value_el = row.select_one("[class*=__value]")
+        if not label_el or not value_el:
             continue
-        src = (img.get("src") or "").lower()
-        text = li.get_text(" ", strip=True)
-        if not text:
+        label = label_el.get_text(strip=True).lower()
+        value = value_el.get_text(strip=True)
+        if not value:
             continue
-        if "icon-mileage" in src:
-            out["overview_mileage_raw"] = text
-            out["mileage_mi"] = _mileage_mi(text)
-        elif "icon-transmission" in src:
-            out["transmission"] = normalize_transmission(text)
-        elif "icon-direction" in src:
-            out["drive_side"] = text
-        elif "icon-paint" in src:
-            out["ext_color"] = text
-        elif "icon-interior" in src:
-            out["int_color"] = text
-        elif "icon-engine" in src or "icon-engin" in src:
-            out["engine_overview"] = text
+        if "engine" in label:
+            out["engine_overview"] = value
+        elif "mileage" in label or "odometer" in label:
+            out["overview_mileage_raw"] = value
+            out["mileage_mi"] = _mileage_mi(value)
+        elif "transmission" in label or "gearbox" in label:
+            out["transmission"] = normalize_transmission(value)
+        elif "exterior" in label or "colour" in label or "color" in label:
+            out["ext_color"] = value
+        elif "interior" in label:
+            out["int_color"] = value
+        elif "lot" in label:
+            m = re.search(r"#?\s*(\d+)", value)
+            if m:
+                out["lot_number"] = m.group(1)
+
+    # ── Lot number from standalone "Lot #XXXXX" text anywhere on the page ─────
+    if "lot_number" not in out:
+        lot_text = soup.get_text(" ", strip=True)
+        m = re.search(r"\bLot\s*#\s*(\d+)\b", lot_text, re.I)
+        if m:
+            out["lot_number"] = m.group(1)
+
     return out
+
+
+_DESC_VIN_RE = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b", re.I)
+_DESC_CHASSIS_RE = re.compile(
+    r"(?:chassis|vin|serial|frame)\s*(?:no\.?|number|#)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-/]{3,23}[A-Z0-9])",
+    re.I,
+)
+
+
+def _vin_from_description(text: str) -> str | None:
+    """Scan description prose for a VIN or chassis number."""
+    if not text:
+        return None
+    m = _DESC_VIN_RE.search(text)
+    if m:
+        v = normalize_vin(m.group(1))
+        if v:
+            return v
+    m = _DESC_CHASSIS_RE.search(text)
+    if m:
+        cand = re.sub(r"[\s\-]", "", m.group(1).strip().upper())
+        v = normalize_vin(cand)
+        if v:
+            return v
+    return None
 
 
 def parse_detail_html(html: str | None) -> dict[str, Any]:
@@ -250,6 +330,10 @@ def parse_detail_html(html: str | None) -> dict[str, Any]:
     if desc_el:
         description = _clean_description(desc_el.get_text(" ", strip=True))
 
+    # Fall back to description scan when data-vin is absent or a placeholder like "TBC".
+    if not vin and description:
+        vin = _vin_from_description(description)
+
     price_sold = attrs.get("pricesold") or attrs.get("saleprice")
     amount_native = int(price_sold) if price_sold and str(price_sold).isdigit() else None
 
@@ -264,7 +348,7 @@ def parse_detail_html(html: str | None) -> dict[str, Any]:
         "currency": _currency_iso(attrs.get("currency_code")),
         "vin": vin,
     }
-    for k in ("mileage_mi", "transmission", "ext_color", "int_color", "engine_overview", "drive_side"):
+    for k in ("mileage_mi", "transmission", "ext_color", "int_color", "engine_overview", "drive_side", "lot_number"):
         if overview.get(k):
             out[k] = overview[k]
     return out
@@ -297,9 +381,12 @@ def merge_summary(typesense_row: dict[str, Any], detail: dict[str, Any]) -> dict
     ev = detail.get("engine_overview")
     if ev:
         base = out.get("engine_spec")
-        if base and ev.lower() not in base.lower():
-            out["engine_spec"] = f"{base} — {ev}"
-        elif not base:
+        # Prefer the HTML value when it contains a displacement (e.g. "4.5L V8")
+        # or when the Typesense value is already contained inside the HTML value.
+        _ev_has_displacement = bool(re.search(r"\d+\.?\d*\s*[Ll]\b", ev))
+        if not base:
+            out["engine_spec"] = ev
+        elif _ev_has_displacement or ev.lower() not in base.lower():
             out["engine_spec"] = ev
 
     for key in ("bid_count", "amount_native", "selling_date", "make", "model", "year", "currency"):
@@ -308,5 +395,8 @@ def merge_summary(typesense_row: dict[str, Any], detail: dict[str, Any]) -> dict
             if key in ("make", "model", "year", "currency") and out.get(key):
                 continue
             out[key] = v
+
+    if detail.get("lot_number") and not out.get("lot_number"):
+        out["lot_number"] = detail["lot_number"]
 
     return out

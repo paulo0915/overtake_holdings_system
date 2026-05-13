@@ -18,9 +18,9 @@ from shared.normalizer import get_scraped_at
 from shared.schemas import AUCTION_COLUMNS
 
 from . import api_client, record_builder
-from .api_client import CarbuckleApiError
+from .api_client import CarbuckleApiError, fetch_listing_html
 from .config import PER_PAGE
-from .listing_parser import merge_firestore_into_row, parse_document
+from .listing_parser import merge_firestore_into_row, parse_document, parse_vin_from_listing_html
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +143,7 @@ class CarbuckleScraper(BaseScraper):
             or r.get("amount") is None       # CLASSIFIED price lives in priceBuy
             or not r.get("country")
             or _selling_date_is_future(r.get("selling_date"))
+            or not r.get("vin")
         ]
         if not needs_enrich:
             return
@@ -163,6 +164,23 @@ class CarbuckleScraper(BaseScraper):
             await asyncio.sleep(0.15)
 
         logger.info("Firestore enrichment complete: %s docs fetched", enriched)
+
+        # VIN fallback: fetch listing HTML for rows still missing VIN
+        missing_vin = [r for r in rows if not r.get("vin") and r.get("listing_url")]
+        if missing_vin:
+            logger.info("Fetching listing HTML for %s rows missing VIN", len(missing_vin))
+            vin_found = 0
+            for r in missing_vin:
+                path = (r.get("listing_url") or "").split("/listing/")[-1]
+                if not path:
+                    continue
+                html = await fetch_listing_html(client, path)
+                v = parse_vin_from_listing_html(html)
+                if v:
+                    r["vin"] = v
+                    vin_found += 1
+                await asyncio.sleep(0.3)
+            logger.info("VIN HTML fallback: found %s/%s", vin_found, len(missing_vin))
 
     async def _filter_by_min_price(
         self, rows: list[dict], fx: FXConverter

@@ -201,8 +201,11 @@ def parse_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
     raw_mileage = detail.get("mileage")
     if isinstance(raw_mileage, str) and raw_mileage.strip():
         rl = raw_mileage.strip().lower()
-        unit = "km" if "km" in rl or "kilomet" in rl else None
-        mileage_mi = normalize_mileage(raw_mileage, unit)
+        if rl in ("n/a", "na", "not available", "-"):
+            mileage_mi = 0
+        else:
+            unit = "km" if "km" in rl or "kilomet" in rl else None
+            mileage_mi = normalize_mileage(raw_mileage, unit)
 
     desc_parts: list[str] = []
     if detail.get("summary"):

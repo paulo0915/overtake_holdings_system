@@ -62,10 +62,38 @@ class JamesEditionScraper(BaseScraper):
             page = 0
             while True:
                 page += 1
-                try:
-                    html = await session.fetch_list_page(page=page)
-                except Exception as e:
-                    logger.error("SRP page %s failed: %s", page, e)
+                # Retry SRP pages with a fresh proxy on CF challenge — the
+                # proxy pool may have a throttled IP from a prior run.
+                html = None
+                for srp_attempt in range(6):
+                    try:
+                        html = await session.fetch_list_page(page=page)
+                        break
+                    except RuntimeError as e:
+                        if "CF challenge" in str(e) and srp_attempt < 5:
+                            logger.warning(
+                                "CF challenge on SRP page %s (attempt %d) — rotating proxy",
+                                page, srp_attempt + 1,
+                            )
+                            await session.rotate_proxy()
+                        else:
+                            logger.error("SRP page %s failed: %s", page, e)
+                            break
+                    except Exception as e:
+                        err_lower = str(e).lower()
+                        retryable = any(
+                            kw in err_lower for kw in ("timed out", "timeout", "connection", "refused")
+                        )
+                        if retryable and srp_attempt < 5:
+                            logger.warning(
+                                "SRP page %s network error (attempt %d) — rotating proxy: %s",
+                                page, srp_attempt + 1, e,
+                            )
+                            await session.rotate_proxy()
+                        else:
+                            logger.error("SRP page %s failed: %s", page, e)
+                            break
+                if html is None:
                     break
 
                 tiles = list(iter_listings(html))
@@ -113,11 +141,15 @@ class JamesEditionScraper(BaseScraper):
             logger.info("Collected %s listings - fetching details", len(flat_rows))
 
             # --- Step 2: detail fetches -------------------------------------
-            # Playwright session is single-tab — fetch details sequentially
-            # to avoid race conditions on the shared page object.
+            # Fetch details sequentially. Rotate the proxy every 200 fetches
+            # to avoid JamesEdition/CF per-IP rate limiting (the proxy IP gets
+            # throttled after ~200-260 requests, causing 45s timeouts).
+            PROXY_ROTATE_EVERY = 200
             details: dict[str, dict] = {}
             total = len(flat_rows)
             for idx, flat in enumerate(flat_rows, 1):
+                if idx > 1 and (idx - 1) % PROXY_ROTATE_EVERY == 0:
+                    await session.rotate_proxy()
                 key = flat["record_id"]
                 try:
                     raw = await session.fetch_detail_html(url=flat["listing_url"])

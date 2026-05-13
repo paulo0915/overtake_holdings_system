@@ -321,7 +321,7 @@ def _sale_slug(post: dict[str, Any]) -> str | None:
 
 def _vin_token_plausible(s: str) -> bool:
     t = re.sub(r"[\s\-]", "", (s or "").strip())
-    if len(t) < 4 or len(t) > 24:
+    if len(t) < 4 or len(t) > 25:
         return False
     if t.isdigit() or not any(c.isalpha() for c in t):
         return False
@@ -535,10 +535,10 @@ def extract_vin_from_description(desc: str | None) -> str | None:
     if m:
         return m.group(1).upper()
     patterns = (
-        r"(?is)\bvin\s*[#:.]?\s*([A-HJ-NPR-Z0-9](?:[A-HJ-NPR-Z0-9\s\-]{3,16})[A-HJ-NPR-Z0-9])\b",
-        r"(?is)\bvehicle\s+identification\s*(?:number|no\.?)\s*[#:.]?\s*([A-HJ-NPR-Z0-9](?:[\w\-]{3,16})\w)\b",
-        r"(?is)\bchassis\s*(?:number|no\.?)?\s*[#:.]?\s*([A-Z0-9](?:[A-Z0-9\-]{2,16})[A-Z0-9])\b",
-        r"(?is)\bserial\s*(?:number|no\.?)?\s*[#:.]?\s*([A-Z0-9](?:[A-Z0-9\-]{3,16})[A-Z0-9])\b",
+        r"(?is)\bvin\s*[#:.]?\s*([A-HJ-NPR-Z0-9](?:[A-HJ-NPR-Z0-9\s\-]{3,23})[A-HJ-NPR-Z0-9])\b",
+        r"(?is)\bvehicle\s+identification\s*(?:number|no\.?)\s*[#:.]?\s*([A-HJ-NPR-Z0-9](?:[\w\-]{3,23})\w)\b",
+        r"(?is)\bchassis\s*(?:number|no\.?)?\s*[#:.]?\s*([A-Z0-9](?:[A-Z0-9\-]{2,23})[A-Z0-9])\b",
+        r"(?is)\bserial\s*(?:number|no\.?)?\s*[#:.]?\s*([A-Z0-9](?:[A-Z0-9\-]{3,23})[A-Z0-9])\b",
     )
     for pat in patterns:
         mm = re.search(pat, plain)
@@ -567,22 +567,133 @@ def enrich_vin_and_transmission_from_description(
             merged["vin"] = v
 
 
+_HTML_MILEAGE_RE = re.compile(
+    r"(?:^|[\s(])(\d[\d,]{0,6})\s*(?:original|actual|indicated|documented|showing|approximately|approx\.?)?\s*(?:miles?|mi\.?)\b",
+    re.I,
+)
+_HTML_KM_RE = re.compile(
+    r"(?:^|[\s(])(\d[\d,]{0,6})\s*(?:km|kilometers?|kilometres?)\b",
+    re.I,
+)
+
+
+_HTML_VIN_PLACEHOLDER = frozenset({"N/A", "TBD", "TBC", "NONE", "-", "NA", "UNKNOWN", ""})
+
+
+def _html_vin_fallback(soup: BeautifulSoup) -> str | None:
+    """Scan rendered HTML for the VIN/Serial block Mecum renders in the lot header."""
+    # <div class="LotHeader-module__...__odometerSerial">
+    #   <div><p>VIN / Serial</p><p>10913</p></div>
+    # </div>
+    for el in soup.find_all(class_=lambda c: c and "odometerSerial" in " ".join(c) if isinstance(c, list) else "odometerSerial" in (c or "")):
+        ps = el.find_all("p")
+        for i, p in enumerate(ps):
+            label = p.get_text(strip=True).lower()
+            if "vin" in label or "serial" in label or "chassis" in label or "frame" in label:
+                if i + 1 < len(ps):
+                    val = ps[i + 1].get_text(strip=True)
+                    if not val or val.upper() in _HTML_VIN_PLACEHOLDER:
+                        continue
+                    cand = re.sub(r"[\s\-]+", "", val).upper()
+                    # Accept standard alphanumeric chassis OR purely-numeric serials (e.g. "10913").
+                    # _vin_token_plausible rejects all-digit strings, so check separately.
+                    if _vin_token_plausible(cand):
+                        return cand
+                    if cand.isdigit() and 4 <= len(cand) <= 25:
+                        return cand
+    return None
+
+
+def _html_mileage_fallback(soup: BeautifulSoup) -> int | None:
+    """Extract mileage from rendered <li> or <p> elements (e.g. '194 miles', '32,000 km')."""
+    for tag in soup.find_all(["li", "p", "span", "td"]):
+        text = tag.get_text(" ", strip=True)
+        if not text or len(text) > 120:
+            continue
+        cleaned = re.sub(r"(?<=\d),(?=\d{3}\b)", "", text)
+        m = _HTML_MILEAGE_RE.search(cleaned)
+        if m:
+            try:
+                return int(m.group(1).replace(",", ""))
+            except ValueError:
+                pass
+        m = _HTML_KM_RE.search(cleaned)
+        if m:
+            try:
+                return round(int(m.group(1).replace(",", "")) * 0.621371)
+            except ValueError:
+                pass
+    return None
+
+
+_DESC_SKIP_HEADINGS = {"SPECIFICATIONS", "PHOTOS", "VIDEOS", "DOCUMENTATION"}
+
+
+def _description_from_article(soup: BeautifulSoup) -> str | None:
+    """Mecum's App Router rebuild dropped __NEXT_DATA__. The editorial body
+    is now rendered as discrete sections inside ``<article>``: HIGHLIGHTS,
+    THE STORY, EQUIPMENT, and lot-specific history blocks. Concatenate them.
+    """
+    article = soup.find("article")
+    if not article:
+        return None
+    chunks: list[str] = []
+    for el in article.select("[class*=lotSection], [class*=Group-module]"):
+        text = el.get_text(" ", strip=True)
+        if not text or len(text) < 20:
+            continue
+        first_word = text.split(" ", 1)[0].upper()
+        if first_word in _DESC_SKIP_HEADINGS:
+            continue
+        chunks.append(text)
+    if not chunks:
+        return None
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for c in chunks:
+        if c in seen:
+            continue
+        seen.add(c)
+        deduped.append(c)
+    return "\n\n".join(deduped)[:50_000]
+
+
 def parse_lot_html(html: str | None) -> dict[str, Any] | None:
     """Parse lot detail page HTML into a dict overlay (or ``None``)."""
     if not html or not str(html).strip():
         return None
+
+    result: dict[str, Any] = {}
     m = _NEXT_DATA_RE.search(html)
-    if not m:
-        logger.debug("No __NEXT_DATA__ on lot page")
-        return None
-    try:
-        data = json.loads(m.group(1))
-    except json.JSONDecodeError:
-        return None
-    post = (data.get("props") or {}).get("pageProps", {}).get("post")
-    if not isinstance(post, dict):
-        return None
-    return parse_lot_post(post)
+    if m:
+        try:
+            data = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            data = {}
+        post = (data.get("props") or {}).get("pageProps", {}).get("post")
+        if isinstance(post, dict):
+            parsed = parse_lot_post(post)
+            if parsed:
+                result = parsed
+
+    # Always try the rendered HTML for VIN/mileage — catches lots whose
+    # __NEXT_DATA__ is absent (server-side render variants) or whose
+    # GraphQL fields are blank while the visible page still shows the data.
+    soup = BeautifulSoup(html, "lxml")
+    if not result.get("vin"):
+        v = _html_vin_fallback(soup)
+        if v:
+            result["vin"] = v
+    if result.get("mileage_mi") is None:
+        mi = _html_mileage_fallback(soup)
+        if mi is not None:
+            result["mileage_mi"] = mi
+    if not result.get("listing_description"):
+        desc = _description_from_article(soup)
+        if desc:
+            result["listing_description"] = desc
+
+    return result if result else None
 
 
 def merge_hit_and_detail(hit_summary: dict[str, Any], detail: dict[str, Any] | None) -> dict[str, Any]:

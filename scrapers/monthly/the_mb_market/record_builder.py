@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from shared.fx_converter import FXConverter
 from shared.normalizer import is_non_car_make
 
 logger = logging.getLogger(__name__)
+
+# Titles containing these phrases are automobilia / toys / parts — not real cars.
+_NON_CAR_TITLE_RE = re.compile(
+    r"\b(pedal\s+car|toy\s+car|scale\s+model|automobilia|memorabilia"
+    r"|model\s+car|slot\s+car|rc\s+car|diecast|miniature\s+car"
+    r"|poster|artwork|brochure|parts\s+lot|wheels?\s+lot)\b",
+    re.IGNORECASE,
+)
 
 
 async def build_records(
@@ -39,6 +48,9 @@ async def build_records(
             skipped["non_car"] += 1
             continue
         if is_non_car_make(s.get("make")):
+            skipped["non_car"] += 1
+            continue
+        if _NON_CAR_TITLE_RE.search(title):
             skipped["non_car"] += 1
             continue
         if vehicle_filter and title:

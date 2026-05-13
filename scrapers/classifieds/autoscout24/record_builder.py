@@ -46,7 +46,12 @@ async def build_record(
         km = flat["mileage_km_hint"]
         mileage_mi = int(round(km * 0.621371))
 
-    seg = listing_segment if listing_segment and listing_segment != "all" else None
+    if listing_segment and listing_segment != "all":
+        seg = listing_segment
+    else:
+        # Per-listing offer_type from the API: "U" = used, "N" = new
+        ot = (flat.get("offer_type") or "").upper()
+        seg = "used" if ot == "U" else "new" if ot == "N" else None
 
     return {
         "Record_ID": flat["record_id"],

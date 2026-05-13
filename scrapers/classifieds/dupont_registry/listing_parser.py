@@ -8,7 +8,7 @@ import logging
 import re
 from typing import Any
 
-from shared.normalizer import normalize_engine_spec, normalize_transmission
+from shared.normalizer import extract_description_fields, normalize_engine_spec, normalize_transmission
 
 from .config import CA_PROVINCES, DETAIL_URL_TEMPLATE, SITE_ORIGIN
 
@@ -301,8 +301,40 @@ def parse_detail_html(html: str) -> dict[str, Any]:
     ext = jsonld.get("color") or None
     intc = jsonld.get("vehicleInteriorColor") or None
 
-    transmission = extract_transmission_from_description(description)
-    engine_spec = extract_engine_from_description(description)
+    # Use the shared multi-pattern extractor (covers "twin-turbo V12", "6.5-liter
+    # naturally aspirated V12", "PDK dual-clutch", etc.) — more patterns than the
+    # old local regexes which required displacement immediately before V-config.
+    desc_fields = extract_description_fields(description or "") if description else {}
+    engine_spec = desc_fields.get("engine")
+    transmission = desc_fields.get("transmission")
+
+    # JSON-LD vehicleTransmission is populated by some dealers — use as fallback.
+    if not transmission:
+        jt = jsonld.get("vehicleTransmission")
+        if jt:
+            transmission = normalize_transmission(str(jt))
+
+    # JSON-LD vehicleEngine is a schema.org EngineSpecification dict on some listings.
+    if not engine_spec:
+        je = jsonld.get("vehicleEngine")
+        if isinstance(je, dict):
+            disp = je.get("engineDisplacement") or {}
+            val = disp.get("value") if isinstance(disp, dict) else None
+            unit_raw = (disp.get("unitText") or "").strip().lower() if isinstance(disp, dict) else ""
+            etype = (je.get("engineType") or "").strip()
+            if val:
+                try:
+                    num = float(str(val).replace(",", ""))
+                    if unit_raw in ("cc", "cm3", "cm³"):
+                        disp_str = f"{num / 1000:.1f}-Liter"
+                    elif unit_raw in ("l", "liter", "liters", "litre", "litres"):
+                        disp_str = f"{num:.1f}-Liter"
+                    else:
+                        disp_str = str(val)
+                except (TypeError, ValueError):
+                    disp_str = str(val)
+                raw = f"{disp_str} {etype}".strip()
+                engine_spec = normalize_engine_spec(raw) or raw
 
     return {
         "description": description,

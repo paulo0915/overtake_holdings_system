@@ -7,6 +7,8 @@ import logging
 import re
 from typing import Any
 
+from bs4 import BeautifulSoup
+
 from shared.normalizer import normalize_engine_spec, normalize_transmission
 
 from .config import DETAIL_URL_TEMPLATE, SITE_ORIGIN
@@ -155,30 +157,75 @@ def _find_listing_vehicle(apollo: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def parse_detail_payload(root: dict[str, Any] | None) -> dict[str, Any]:
-    """Extract the seller-written description (and a few fallback fields)
-    from the ``__NEXT_DATA__`` blob.
+def _seller_notes_from_html(html_text: str) -> str | None:
+    """Parse raw VDP HTML for the Seller Notes section.
 
-    Most tile fields are already populated from the list response — the
-    primary value here is ``description``. We also surface vehicle colors
-    and engine/transmission in case the list-row values were empty.
+    TrueCar renders it in a ``<div data-test="vehicle-comments">`` block
+    (or similar). Used as fallback when the Apollo state has no sellerNotes.
     """
-    if not root:
-        return {}
-    apollo = (root.get("props") or {}).get("pageProps", {}).get("__APOLLO_STATE__")
-    if not apollo:
-        return {}
+    if not html_text:
+        return None
+    soup = BeautifulSoup(html_text, "lxml")
+    # data-test variants seen on TrueCar VDPs
+    for attr_val in ("vehicle-comments", "seller-notes", "sellerNotes", "seller_notes"):
+        el = soup.find(attrs={"data-test": attr_val})
+        if el:
+            text = el.get_text(" ", strip=True)
+            if text:
+                return _clean_seller_notes(text)
+    # aria-label fallback
+    for label in ("Seller Notes", "Seller's Notes", "Seller Comments"):
+        el = soup.find(attrs={"aria-label": re.compile(label, re.I)})
+        if el:
+            text = el.get_text(" ", strip=True)
+            if text:
+                return _clean_seller_notes(text)
+    # heading-based fallback: find h2/h3 containing "seller" then grab next sibling
+    for heading in soup.find_all(["h2", "h3"]):
+        if re.search(r"seller", heading.get_text(), re.I):
+            container = heading.find_parent()
+            if container:
+                text = container.get_text(" ", strip=True)
+                # Strip the heading itself from the text
+                text = re.sub(re.escape(heading.get_text(strip=True)), "", text, count=1).strip()
+                if text:
+                    return _clean_seller_notes(text)
+    return None
 
-    vehicle = _find_listing_vehicle(apollo)
+
+def parse_detail_payload(
+    root: dict[str, Any] | None,
+    html: str | None = None,
+) -> dict[str, Any]:
+    """Extract seller notes + fallback specs from ``__NEXT_DATA__`` + raw HTML.
+
+    ``sellerNotes`` is on the **Listing** object in Apollo state, NOT on the
+    Vehicle object — the previous implementation looked in the wrong place.
+    Raw HTML is used as a secondary fallback when the Apollo entry is absent.
+    """
+    apollo: dict[str, Any] = {}
+    if root:
+        apollo = (root.get("props") or {}).get("pageProps", {}).get("__APOLLO_STATE__") or {}
+
+    # --- seller notes: Listing object first, then HTML fallback ---------------
+    description: str | None = None
+    for key, obj in apollo.items():
+        if key.startswith("Listing:") and isinstance(obj, dict):
+            raw_notes = obj.get("sellerNotes") or obj.get("sellerNote") or obj.get("notes")
+            if raw_notes:
+                description = _clean_seller_notes(str(raw_notes))
+                break
+
+    if not description and html:
+        description = _seller_notes_from_html(html)
+
+    # --- vehicle specs --------------------------------------------------------
+    vehicle = _find_listing_vehicle(apollo) if apollo else None
     if not vehicle:
-        return {}
+        return {"description": description}
 
-    description = _clean_seller_notes(vehicle.get("sellerNotes"))
-
-    # Colors on the detail payload are refs into the store; resolve if so.
     ext = _resolve_color(apollo, vehicle.get("exteriorColor"))
     intc = _resolve_color(apollo, vehicle.get("interiorColor"))
-
     engine_spec = normalize_engine_spec(vehicle.get("engine"))
     transmission = normalize_transmission(vehicle.get("transmission"))
 

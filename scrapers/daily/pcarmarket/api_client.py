@@ -129,8 +129,17 @@ class PCarAPIClient:
                         headers=get_headers(referer=f"{PCAR_BASE_URL}/auction/{detail_slug}"),
                         timeout=REQUEST_TIMEOUT,
                     )
+                    # 404 = expired/deleted listing — mark and skip, don't raise.
+                    if resp.status_code == 404:
+                        logger.debug(f"Expired listing (404): {slug}")
+                        return (slug, {"_not_found": True})
                     resp.raise_for_status()
                     data = resp.json()
+
+                    # Expired / deleted listings return {"detail": "Not found."} or similar.
+                    if isinstance(data, dict) and data.get("detail"):
+                        logger.debug(f"Expired listing skipped: {slug}")
+                        return (slug, {"_not_found": True})
 
                     # Follow redirect once if detail is missing
                     redirect_slug = data.get("redirect_slug")

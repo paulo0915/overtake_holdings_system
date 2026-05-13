@@ -90,7 +90,7 @@ async def build_records(
                 "Auction_event": event or None,
                 "Country": "USA",
                 "Image_url": m.get("image_url"),
-                "Listing_url": f"https://listings.worldwideauctioneers.com/inventory/#lot-{rid}",
+                "Listing_url": "https://listings.worldwideauctioneers.com/results/",
                 "Source": "listings.worldwideauctioneers.com",
                 "Listing_description": None,
                 "Scraped_at": scraped_at,

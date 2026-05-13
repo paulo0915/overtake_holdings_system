@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
+from bs4 import BeautifulSoup
+
 from shared.normalizer import KM_TO_MILES, normalize_transmission
 
 from .config import BASE_URL, IMAGE_CDN_BASE
@@ -180,13 +182,35 @@ def parse_price(doc: dict[str, Any]) -> tuple[int | None, str]:
 
 
 # ── VIN ────────────────────────────────────────────────────────────────────────
+_VIN_PLACEHOLDERS = frozenset({"N/A", "NA", "TBD", "TBC", "NONE", "UNKNOWN", "-", ""})
+
+
+def _validate_vin_string(raw: str) -> str | None:
+    """Clean and uppercase a VIN/chassis string, stripping strange chars."""
+    cleaned = re.sub(r"[^a-zA-Z0-9\-./]", "", raw.strip()).strip("-./").upper()
+    if not cleaned or cleaned in _VIN_PLACEHOLDERS or len(cleaned) > 25:
+        return None
+    return cleaned
+
+
 def parse_vin(doc: dict[str, Any]) -> str | None:
-    for key in ("facet_vin", "facet_VIN#", "facet_VIN", "vin"):
+    # Try all known key names first (explicit priority order).
+    for key in ("facet_vin", "facet_VIN#", "facet_VIN", "vin", "facet_serial", "serial"):
         v = doc.get(key)
-        if v and str(v).strip():
-            raw = str(v).strip().upper()
-            if len(raw) in (11, 17) and re.match(r"^[A-HJ-NPR-Z0-9]+$", raw):
-                return raw
+        if v:
+            result = _validate_vin_string(str(v))
+            if result:
+                return result
+    # Case-insensitive scan: catches any key whose name contains "vin" or "serial"
+    # regardless of capitalization or prefix (e.g. "facet_VIN#", "VIN #", "chassis").
+    for key, v in doc.items():
+        if not v:
+            continue
+        kl = key.lower().replace(" ", "").replace("#", "").replace("_", "")
+        if kl in ("vin", "facetvin", "serial", "facetserial", "chassis", "facetchassis"):
+            result = _validate_vin_string(str(v))
+            if result:
+                return result
     return None
 
 
@@ -235,8 +259,11 @@ def parse_transmission(doc: dict[str, Any]) -> str | None:
     raw = doc.get("facet_transmission")
     if raw:
         return normalize_transmission(str(raw).strip())
-    # facet_isAutomatic boolean is set by the "Automatic: Yes/No" detail-page spec
-    is_auto = doc.get("facet_isAutomatic") or doc.get("isAutomatic")
+    # facet_isAutomatic boolean is set by the "Automatic: Yes/No" detail-page spec.
+    # Use explicit None check — `or` short-circuits on False and loses the signal.
+    is_auto = doc.get("facet_isAutomatic")
+    if is_auto is None:
+        is_auto = doc.get("isAutomatic")
     if is_auto is True:
         return "automatic"
     if is_auto is False:
@@ -493,6 +520,29 @@ def _extract_transmission_from_text(text: str) -> str | None:
     return None
 
 
+def parse_vin_from_listing_html(html: str | None) -> str | None:
+    """Extract VIN from Carbuckle's Vue-rendered spec table (``div.specsColumn``)."""
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    for col in soup.find_all("div", class_=lambda c: c and "specsColumn" in (c or "")):
+        name_el = col.find("div", class_=lambda c: c and "specsFieldName" in (c or ""))
+        val_el = col.find("div", class_=lambda c: c and "specsFieldValue" in (c or ""))
+        if not name_el or not val_el:
+            continue
+        label = name_el.get_text(strip=True).lower().replace("#", "").replace(" ", "")
+        if "vin" not in label:
+            continue
+        # Prefer ``title`` attribute (has the clean value even when text is icon-polluted)
+        span = val_el.find("span", class_=lambda c: c and "specsValueText" in (c or ""))
+        raw = (span.get("title") or span.get_text(strip=True)) if span else val_el.get_text(strip=True)
+        raw = raw.strip()
+        result = _validate_vin_string(raw)
+        if result:
+            return result
+    return None
+
+
 def merge_firestore_into_row(row: dict[str, Any], fs_doc: dict) -> dict[str, Any]:
     """Enrich a parsed row with data from a Firestore document.
 
@@ -528,7 +578,9 @@ def merge_firestore_into_row(row: dict[str, Any], fs_doc: dict) -> dict[str, Any
             row["transmission"] = normalize_transmission(raw_tx)
         else:
             # facet_isAutomatic is set when the seller ticks "Automatic: Yes/No"
-            is_auto = flat.get("facet_isAutomatic") or flat.get("isAutomatic")
+            is_auto = flat.get("facet_isAutomatic")
+            if is_auto is None:
+                is_auto = flat.get("isAutomatic")
             if is_auto is True:
                 row["transmission"] = "automatic"
             elif is_auto is False:

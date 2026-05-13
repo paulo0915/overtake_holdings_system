@@ -1,17 +1,12 @@
 """PCarMarket record assembly — lot filtering, FX conversion, schema mapping."""
 
 import logging
-import re
 
 from shared.fx_converter import FXConverter
 
 from . import listing_parser as _parser
 
 logger = logging.getLogger(__name__)
-
-# PCarMarket internal listing ID pattern — not a real auction lot number.
-# e.g. "V-0039563-MP", "V-0009703", "V-0009703-MP"
-_PCAR_INTERNAL_ID_RE = re.compile(r"^V-\d+", re.IGNORECASE)
 
 
 async def build_records(
@@ -54,11 +49,14 @@ async def build_records(
 
         slug = item.get("slug", "")
         detail = details.get(slug, {})
+
+        if detail.get("_not_found"):
+            logger.info(f"Skipping expired/deleted listing: {slug}")
+            continue
+
         parsed = _parser.parse(item, detail)
 
-        # Lot number — reject internal PCarMarket listing IDs
-        raw_lot = parsed["lot_number_raw"]
-        lot_number = None if (raw_lot and _PCAR_INTERNAL_ID_RE.match(raw_lot)) else raw_lot
+        lot_number = parsed["lot_number_raw"]
 
         # FX conversion
         selling_price = parsed["selling_price"]

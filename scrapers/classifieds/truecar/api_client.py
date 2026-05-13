@@ -5,6 +5,10 @@ because PX fingerprints TLS (JA3) + HTTP/2 frames. We use curl_cffi's Chrome
 impersonation which matches real Chrome on the wire; PX treats it as a real
 browser. A warmup sequence (homepage → SRP → tiny wait) is still needed so
 PX sees a "natural" user flow before our GraphQL POST.
+
+When the datacenter IP is blocked at the IP level (homepage itself 403s),
+a residential proxy from the ``proxies`` Supabase table is required.
+Pass ``proxy_url`` to ``new_session()`` to route through one.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 from typing import Any
 
@@ -35,16 +40,16 @@ from .queries import LIST_QUERY
 
 logger = logging.getLogger(__name__)
 
-# curl_cffi impersonation profile. "chrome124" is close enough to the UA we
-# send and matches the modern TLS fingerprint PX expects.
-IMPERSONATE = "chrome124"
+# curl_cffi impersonation profile. Use a recent Chrome build; PX fingerprint
+# databases update over time so we track the newest available profile.
+IMPERSONATE = "chrome136"
 
 # SRP URLs per mode — the Referer we send AND the page we warm up on has to
 # match the condition we're about to query, otherwise PerimeterX 403s the
 # POST as a suspicious context-switch.
 _SRP_URL_BY_MODE = {
-    "used": f"{SITE_ORIGIN}/used-cars-for-sale/listings/?city=santa-monica&state=ca&sort[]=price_desc",
-    "new": f"{SITE_ORIGIN}/new-cars-for-sale/listings/?city=santa-monica&state=ca&sort[]=price_desc",
+    "used": f"{SITE_ORIGIN}/used-cars-for-sale/listings/?sort[]=price_desc",
+    "new": f"{SITE_ORIGIN}/new-cars-for-sale/listings/?sort[]=price_desc",
 }
 
 
@@ -52,14 +57,19 @@ def _graphql_headers(mode: str) -> dict[str, str]:
     return {
         "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
         "Content-Type": "application/json",
         "Origin": SITE_ORIGIN,
         "Referer": _SRP_URL_BY_MODE.get(mode, _SRP_URL_BY_MODE["used"]),
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
         # Non-optional — without these the endpoint 403s.
         "apollographql-client-name": CLIENT_NAME,
         "authorization-mode": AUTHORIZATION_MODE,
         "x-gql-operation-name": OPERATION_NAME,
     }
+
 
 # Retry only on transport + 5xx. A 403 from PX is deterministic — retrying
 # without a fresh warmup won't help; we'd rather fail fast and let the caller
@@ -67,12 +77,30 @@ def _graphql_headers(mode: str) -> dict[str, str]:
 _RETRY_EXCEPTIONS = (cffi.exceptions.ConnectionError, cffi.exceptions.Timeout)
 
 
-def new_session() -> AsyncSession:
+def new_session(proxy_url: str | None = None) -> AsyncSession:
     """Build a curl_cffi AsyncSession impersonating Chrome.
 
+    Pass ``proxy_url`` (``http://user:pass@host:port``) to route through a
+    residential proxy — required when the datacenter IP is PX-blocked.
     Call ``warmup(session)`` on it before issuing GraphQL POSTs.
     """
-    return AsyncSession(impersonate=IMPERSONATE, timeout=30)
+    kwargs: dict[str, Any] = {"impersonate": IMPERSONATE, "timeout": 30}
+    if proxy_url:
+        kwargs["proxy"] = proxy_url
+    return AsyncSession(**kwargs)
+
+
+_WARMUP_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 
 async def warmup(session: AsyncSession, mode: str = "used") -> None:
@@ -82,11 +110,17 @@ async def warmup(session: AsyncSession, mode: str = "used") -> None:
     The SRP warmup URL must match ``mode`` — warming up on ``/used-cars-...``
     and then POSTing a ``condition: NEW`` query triggers a 403.
     """
-    await session.get(f"{SITE_ORIGIN}/")
-    await asyncio.sleep(0.6)
-    await session.get(_SRP_URL_BY_MODE.get(mode, _SRP_URL_BY_MODE["used"]))
-    # Small pause — helps PX cookies settle before the XHR fires.
-    await asyncio.sleep(1.0)
+    r = await session.get(f"{SITE_ORIGIN}/", headers=_WARMUP_HEADERS)
+    if r.status_code == 403:
+        raise RuntimeError(
+            f"TrueCar homepage returned 403 — datacenter IP blocked by PerimeterX. "
+            "Add residential proxies to the 'proxies' Supabase table."
+        )
+    await asyncio.sleep(1.2 + random.uniform(0.3, 0.8))
+    srp_headers = {**_WARMUP_HEADERS, "Sec-Fetch-Site": "same-origin", "Referer": f"{SITE_ORIGIN}/"}
+    await session.get(_SRP_URL_BY_MODE.get(mode, _SRP_URL_BY_MODE["used"]), headers=srp_headers)
+    # Give PX cookies time to settle and simulate reading time before XHR.
+    await asyncio.sleep(2.0 + random.uniform(0.5, 1.5))
 
 
 def _check_gql_errors(payload: dict[str, Any], op: str) -> None:
@@ -167,21 +201,23 @@ async def fetch_detail_html(
     session: AsyncSession,
     *,
     vin: str,
-) -> dict[str, Any] | None:
-    """Fetch the VDP HTML and return the parsed ``__NEXT_DATA__`` JSON.
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Fetch the VDP HTML and return ``(next_data_dict, raw_html)``.
 
-    Returns ``None`` if the listing is gone (404) or the page didn't render
-    the expected script tag.
+    ``next_data_dict`` is the parsed ``__NEXT_DATA__`` JSON (or None).
+    ``raw_html`` is the full page text, used as fallback for seller notes.
+    Returns ``(None, None)`` if the listing is gone (404).
     """
     url = DETAIL_URL_TEMPLATE.format(origin=SITE_ORIGIN, vin=vin)
     r = await session.get(url, headers=_HTML_HEADERS)
     if r.status_code != 200:
-        return None
-    m = _NEXT_DATA_RE.search(r.text)
+        return None, None
+    html_text = r.text
+    m = _NEXT_DATA_RE.search(html_text)
     if not m:
-        return None
+        return None, html_text
     try:
-        return json.loads(m.group(1))
+        return json.loads(m.group(1)), html_text
     except json.JSONDecodeError as e:
         logger.debug("NEXT_DATA parse failed for %s: %s", vin, e)
-        return None
+        return None, html_text

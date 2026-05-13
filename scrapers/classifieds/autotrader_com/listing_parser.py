@@ -112,10 +112,20 @@ def parse_list_row(row: dict[str, Any]) -> dict[str, Any] | None:
         vehicle.get("trimName"),
     )
 
-    mileage_mi = _to_int(
-        (row.get("specifications") or {}).get("mileage", {}).get("value")
-        if isinstance(row.get("specifications"), dict) else None,
-    ) or _to_int(row.get("mileage"))
+    _spec = row.get("specifications")
+    _spec_mileage = None
+    if isinstance(_spec, dict):
+        _sm = _spec.get("mileage")
+        if isinstance(_sm, dict):
+            _spec_mileage = _to_int(_sm.get("value"))
+        elif _sm is not None:
+            _spec_mileage = _to_int(_sm)
+    mileage_mi = (
+        _spec_mileage
+        or _to_int(row.get("mileage"))
+        or _to_int((row.get("vehicle") or {}).get("mileage"))
+        or _to_int((row.get("vehicle") or {}).get("odometer"))
+    )
 
     transmission = normalize_transmission(
         _first_str(
@@ -141,8 +151,14 @@ def parse_list_row(row: dict[str, Any]) -> dict[str, Any] | None:
         row.get("exteriorColor"),
     )
     int_color = _first_str(
+        (row.get("specifications") or {}).get("interiorColor", {}).get("value")
+        if isinstance(row.get("specifications"), dict) else None,
+        (row.get("specifications") or {}).get("intColor", {}).get("value")
+        if isinstance(row.get("specifications"), dict) else None,
         row.get("interiorColor"),
         row.get("intColor"),
+        vehicle.get("interiorColor"),
+        vehicle.get("intColor"),
     )
 
     owner = row.get("owner") or {}

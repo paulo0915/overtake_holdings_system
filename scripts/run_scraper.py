@@ -66,6 +66,15 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+# Force UTF-8 on Windows console so Unicode characters in log messages (→, —, etc.)
+# don't raise UnicodeEncodeError and crash the scraper mid-run.
+if sys.platform == "win32":
+    import io
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "buffer"):
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 # curl_cffi requires the selector event loop on Windows (ProactorEventLoop lacks
 # add_reader which curl_cffi's async internals need). But Playwright (used by C&B)
 # needs the Proactor loop to spawn subprocesses, so skip this for --source cab.

@@ -43,6 +43,11 @@ _PRICE_DISCLOSED_RE = re.compile(
     re.I,
 )
 _IMG_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.I)
+# Product page URL embedded in each lot block as an anchor href.
+_BLOCK_PRODUCT_URL_RE = re.compile(
+    r'href=["\']([^"\']*(?:' + re.escape(LISTINGS_ORIGIN) + r')?/product/[^"\']+)["\']',
+    re.I,
+)
 
 # Only accept titles that start with a model year: 1885..2035
 _YEAR_TITLE_RE = re.compile(r'^(1[89]\d{2}|20[0-2]\d|2030|2031|2032|2033|2034|2035)\s+(.+)$')
@@ -143,6 +148,16 @@ def parse_car_search_results(html: str) -> list[dict[str, Any]]:
         if img_src and img_src.startswith("/"):
             img_src = LISTINGS_ORIGIN + img_src
 
+        # Extract product page URL from the lot block anchors (present when the
+        # site links each result to its WooCommerce product page).
+        product_url: str | None = None
+        pu_m = _BLOCK_PRODUCT_URL_RE.search(scope)
+        if pu_m:
+            pu = pu_m.group(1)
+            if pu.startswith("/"):
+                pu = LISTINGS_ORIGIN + pu
+            product_url = pu.rstrip("/") + "/"
+
         slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
         record_id = f"ww_{lot}_{slug[:60]}"
 
@@ -159,7 +174,7 @@ def parse_car_search_results(html: str) -> list[dict[str, Any]]:
             "price_disclosed": price_disclosed,
             "currency": "USD",
             "image_url": img_src,
-            "product_url": None,   # populated by scraper from inventory page
+            "product_url": product_url,
             "vin": None,
             "mileage_mi": None,
             "engine_spec": None,

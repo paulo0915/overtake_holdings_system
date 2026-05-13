@@ -27,7 +27,8 @@ _AUCTION_LOTS_REL_RE = re.compile(r"/auctions/([a-z0-9]+)/lots/?(?=[\"'?#]|\s|$)
 _VEHICLE_REF_RE = re.compile(r"^r\d+", re.I)
 
 _YEAR_LEADING_RE = re.compile(
-    r"^(?P<year>(?:19|20)\d{2})\s+(?P<rest>.+)$",
+    r"^(?:c\.?\s*|circa\s*)?(?P<year>(?:19|20)\d{2})\s+(?P<rest>.+)$",
+    re.I,
 )
 
 # Monetary tokens in ``value`` / ``preSaleEstimate`` strings.
@@ -113,6 +114,9 @@ def parse_auctions_from_results_html(html: str) -> list[dict[str, Any]]:
         sub = sub_el.get_text(" ", strip=True) if sub_el else ""
         date = _parse_auction_date(sub)
 
+        # Append year to name when the tile title omits it (e.g. "The Monaco Auction" → "The Monaco Auction 2026").
+        if name and date and len(date) >= 4 and not re.search(r"\b20\d{2}\b", name):
+            name = f"{name} {date[:4]}"
         out.append({"slug": slug, "name": name, "date": date})
 
     # Fallback: regex-only discovery for slugs without a recognizable card.
@@ -296,13 +300,16 @@ def _extract_spec_pairs(soup: BeautifulSoup) -> dict[str, str]:
     """
     pairs: dict[str, str] = {}
 
-    # Strategy 1 (legacy): div.idlabel / div.iddata inside a col-lg parent.
+    # Strategy 1 (legacy): div.idlabel / div.iddata — try col-lg parent first,
+    # then fall back to direct sibling / parent-child to handle layout variations.
     for lbl in soup.select("div.idlabel"):
         label = lbl.get_text(" ", strip=True)
         parent = lbl.find_parent("div", class_=lambda c: c and "col-lg" in str(c))
-        if not parent:
-            continue
-        data_el = parent.select_one("div.iddata")
+        data_el = parent.select_one("div.iddata") if parent else None
+        if not data_el:
+            data_el = lbl.find_next_sibling("div", class_="iddata")
+        if not data_el and lbl.parent:
+            data_el = lbl.parent.find("div", class_="iddata")
         if not data_el:
             continue
         val = re.sub(r"^\|\s*", "", data_el.get_text(" ", strip=True)).strip()
@@ -347,6 +354,78 @@ def _extract_spec_pairs(soup: BeautifulSoup) -> dict[str, str]:
     return pairs
 
 
+_PAGE_MILEAGE_RE = re.compile(
+    r"(?:odometer|mileage|showing|indicated|recorded|reads?|clocked)[\w\s,]*?(\d[\d,]{0,6})\s*"
+    r"(?:original|actual|indicated|documented|approximately|approx\.?)?\s*(?:miles?|mi\.?|km|kilometres?|kilometers?)\b"
+    r"|(?:^|[\s(])(\d[\d,]{0,6})\s*(?:original|actual|indicated|documented|approximately|approx\.?)?\s*"
+    r"(?:miles?|mi\.?|km|kilometres?|kilometers?)\b",
+    re.I,
+)
+_PAGE_KM_UNIT_RE = re.compile(r"\b(?:km|kilometres?|kilometers?)\b", re.I)
+
+
+def _mileage_raw_from_page(soup: BeautifulSoup) -> str | None:
+    """Scan page <li>/<p> elements for odometer/mileage prose sentences.
+
+    Returns the raw matched substring (e.g. ``"2,478 kilometres"``) so that
+    ``parse_mileage_mi`` can convert it; or ``None`` if nothing found.
+    """
+    for tag in soup.find_all(["li", "p"]):
+        text = tag.get_text(" ", strip=True)
+        if not text or len(text) > 300:
+            continue
+        m = _PAGE_MILEAGE_RE.search(text)
+        if m:
+            # group(1) from odometer-keyword branch, group(2) from bare-number branch
+            num_str = (m.group(1) or m.group(2) or "").replace(",", "")
+            if not num_str:
+                continue
+            unit = "km" if _PAGE_KM_UNIT_RE.search(m.group(0)) else "miles"
+            return f"{num_str} {unit}"
+    return None
+
+
+_CHASSIS_LABEL_RE = re.compile(
+    r"chassis\s*(?:no\.?|number|#)?|vin|serial\s*(?:no\.?|number)?|frame\s*(?:no\.?|number)?",
+    re.I,
+)
+
+
+def _vin_from_spec_pairs(pairs: dict[str, str]) -> str | None:
+    """Return VIN/chassis value from spec pairs, trying all known label variants."""
+    for key in (
+        "VIN", "Chassis No.", "Chassis No", "Chassis Number", "Chassis",
+        "Serial No.", "Serial No", "Serial Number", "Frame No.", "Frame No",
+        "Frame Number",
+    ):
+        v = pairs.get(key)
+        if v and v.strip():
+            return v.strip()
+    # Case-insensitive fallback: iterate all pairs and check label against regex.
+    for label, val in pairs.items():
+        if _CHASSIS_LABEL_RE.fullmatch(label.strip()):
+            if val and val.strip():
+                return val.strip()
+    return None
+
+
+def _vin_from_html(soup: BeautifulSoup) -> str | None:
+    """Fallback: scan idlabel/iddata blocks directly when spec-pair extraction misses them."""
+    for lbl_el in soup.find_all("div", class_="idlabel"):
+        label = lbl_el.get_text(" ", strip=True)
+        if not _CHASSIS_LABEL_RE.search(label):
+            continue
+        data_el = lbl_el.find_next_sibling("div", class_="iddata")
+        if not data_el:
+            parent = lbl_el.find_parent()
+            data_el = parent.find("div", class_="iddata") if parent else None
+        if data_el:
+            val = data_el.get_text(" ", strip=True)
+            if val and val.strip():
+                return re.sub(r"^\|\s*", "", val).strip()
+    return None
+
+
 def parse_lot_detail_html(html: str) -> dict[str, Any]:
     """Parse spec panels + og:title from a lot detail page.
 
@@ -357,11 +436,8 @@ def parse_lot_detail_html(html: str) -> dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
     pairs = _extract_spec_pairs(soup)
 
-    vin = (
-        pairs.get("VIN") or pairs.get("Chassis No.") or pairs.get("Chassis No")
-        or pairs.get("Chassis Number") or pairs.get("Chassis")
-        or pairs.get("Serial No.") or pairs.get("Serial Number")
-    )
+    vin = _vin_from_spec_pairs(pairs) or _vin_from_html(soup)
+
     mileage = (
         pairs.get("Mileage") or pairs.get("Odometer") or pairs.get("Indicated Mileage")
         or pairs.get("Miles") or pairs.get("Kilometers")
@@ -390,6 +466,12 @@ def parse_lot_detail_html(html: str) -> dict[str, Any]:
     )
     description = desc_el.get_text(" ", strip=True) if desc_el else None
 
+    # Mileage: spec panel first, then scan full page <li>/<p> prose for odometer sentences.
+    # RMS sometimes embeds mileage only in bullet points like
+    # "Odometer shows just 2,478 kilometres at the time of cataloguing".
+    if not mileage:
+        mileage = _mileage_raw_from_page(soup)
+
     # Description-text fallback: if spec panel returned nothing useful, mine
     # the description prose using the shared extractor.
     if description and not all([ext, intc, engine, trans]):
@@ -399,6 +481,16 @@ def parse_lot_detail_html(html: str) -> dict[str, Any]:
         engine = engine or desc_fields.get("engine")
         if not trans and desc_fields.get("transmission"):
             trans = desc_fields["transmission"]
+
+    # Final fallback: scan full page text for engine/transmission when the spec
+    # panel and description section both missed them (e.g. RM embeds specs inside
+    # catalogue prose blocks that aren't captured by either selector strategy).
+    if not engine or not trans:
+        full_text = soup.get_text(" ", strip=True)
+        all_desc_fields = extract_description_fields(full_text)
+        engine = engine or all_desc_fields.get("engine")
+        if not trans and all_desc_fields.get("transmission"):
+            trans = all_desc_fields["transmission"]
 
     if trans:
         trans = normalize_transmission(trans) or trans
@@ -423,6 +515,29 @@ def parse_lot_detail_html(html: str) -> dict[str, Any]:
         "image_url": image_url,
         "detail_pairs": pairs,
     }
+
+
+def _mileage_from_description(desc: str) -> int | None:
+    """Extract mileage from free-text description when spec panel has no Mileage field."""
+    if not desc:
+        return None
+    text = re.sub(r"(?<=\d),(?=\d{3}\b)", "", desc)
+    m = re.search(
+        r"(?:^|[\s(])(\d{1,7})\s*(?:original|actual|indicated|documented|showing|approximately|approx\.?)?\s*(?:mi\.?|miles?)\b",
+        text, re.I,
+    )
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    m = re.search(r"(?:^|[\s(])(\d{1,7})\s*(?:km|kilometers?|kilometres?)\b", text, re.I)
+    if m:
+        try:
+            return round(int(m.group(1)) * 0.621371)
+        except ValueError:
+            pass
+    return None
 
 
 def parse_mileage_mi(raw: str | None) -> int | None:
@@ -479,6 +594,9 @@ def merge_api_item_with_detail(
     d = detail or {}
     image_url = d.get("image_url") or thumb
 
+    _mileage_raw_val = parse_mileage_mi(d.get("mileage_raw"))
+    _mileage_val = _mileage_raw_val if _mileage_raw_val is not None else _mileage_from_description(d.get("description") or "")
+
     return {
         "record_id": record_id,
         "auction_slug": auction_slug.lower(),
@@ -500,7 +618,7 @@ def merge_api_item_with_detail(
         "value_type_raw": str(item.get("valueType") or ""),
         **vf,
         "vin": d.get("vin"),
-        "mileage_mi": parse_mileage_mi(d.get("mileage_raw")),
+        "mileage_mi": _mileage_val,
         "ext_color": d.get("ext_color"),
         "int_color": d.get("int_color"),
         "engine_spec": d.get("engine_spec"),

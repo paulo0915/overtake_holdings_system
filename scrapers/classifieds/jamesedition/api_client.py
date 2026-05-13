@@ -64,6 +64,19 @@ class JESession:
             return None
         return html
 
+    async def rotate_proxy(self) -> None:
+        """Swap to a fresh proxy to avoid per-IP rate limiting mid-detail-fetch."""
+        if self._session:
+            await self._session.close()
+        proxy = get_random_proxy()
+        self._proxy_url = proxy.url if proxy else None
+        proxies = {"https": self._proxy_url, "http": self._proxy_url} if self._proxy_url else {}
+        self._session = AsyncSession(impersonate=IMPERSONATE, timeout=45, proxies=proxies)
+        logger.info(
+            "JESession: rotated proxy -> %s",
+            self._proxy_url[:40] + "..." if self._proxy_url else "none",
+        )
+
     async def close(self) -> None:
         if self._session:
             await self._session.close()

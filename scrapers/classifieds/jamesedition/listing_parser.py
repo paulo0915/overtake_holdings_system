@@ -8,6 +8,8 @@ import logging
 import re
 from typing import Any
 
+from bs4 import BeautifulSoup
+
 from shared.normalizer import (
     KM_TO_MILES,
     canonical_country_name,
@@ -261,14 +263,26 @@ def _parse_mileage(raw: str | None) -> int | None:
 
 
 def _parse_details_table(html: str) -> dict[str, str]:
-    """Return the ``<span>Key</span><p>Value</p>`` dict from the details table."""
-    block = _DETAILS_TABLE_RE.search(html)
-    if not block:
+    """Return the ``<span>Key</span><p>Value</p>`` dict from the details table.
+
+    Uses BeautifulSoup to find the container div — the old regex stopped at the
+    first nested ``</div>`` and captured almost nothing.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    container = soup.find("div", class_="je2-listing-details-table")
+    if not container:
         return {}
-    return {
-        html_lib.unescape(k).strip(): html_lib.unescape(v).strip()
-        for k, v in _DETAILS_ROW_RE.findall(block.group(1))
-    }
+    pairs: dict[str, str] = {}
+    for span in container.find_all("span"):
+        key = span.get_text(strip=True)
+        if not key:
+            continue
+        p = span.find_next_sibling("p")
+        if p:
+            val = p.get_text(strip=True)
+            if val and key not in pairs:
+                pairs[key] = val
+    return pairs
 
 
 def _extract_dealer_name(html: str) -> str | None:
@@ -307,6 +321,28 @@ def _extract_description(html: str) -> str | None:
     return cleaned or None
 
 
+def _parse_specs_bar(html: str) -> dict[str, str]:
+    """Parse the ``je2-listing-specs`` quick-stats bar.
+
+    Each item has the format ``<p>VALUE</p><span>LABEL</span>`` (value first,
+    label second — the inverse of the details table). Returns a label→value dict.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    container = soup.find("div", class_="je2-listing-specs")
+    if not container:
+        return {}
+    pairs: dict[str, str] = {}
+    for item in container.find_all("div", class_="je2-listing-specs__item"):
+        p = item.find("p")
+        span = item.find("span")
+        if p and span:
+            label = span.get_text(strip=True)
+            val = p.get_text(strip=True)
+            if label and val and label not in pairs:
+                pairs[label] = val
+    return pairs
+
+
 def parse_detail_html(html: str) -> dict[str, Any]:
     """Pull VIN / colours / engine / gearbox / mileage / dealer / description
     out of a JamesEdition detail page.
@@ -318,6 +354,9 @@ def parse_detail_html(html: str) -> dict[str, Any]:
         return {}
 
     dt = _parse_details_table(html)
+    # Quick-stats bar (je2-listing-specs) — used as fallback when the full
+    # details table doesn't carry mileage / engine / gearbox.
+    sb = _parse_specs_bar(html)
 
     vin = (dt.get("VIN") or "").strip() or None
     ext_color = (dt.get("Color") or "").strip() or None
@@ -326,22 +365,23 @@ def parse_detail_html(html: str) -> dict[str, Any]:
     # Year — the list-tile title often lacks a leading year for aircraft /
     # some dealer-entered Bugattis; the details table fills it in.
     year = None
-    year_raw = (dt.get("Year") or "").strip()
+    year_raw = (dt.get("Year") or sb.get("Year") or "").strip()
     if year_raw:
         try:
-            year = int(year_raw)
+            year = int(year_raw[:4])
         except (TypeError, ValueError):
             year = None
 
-    engine_raw = dt.get("Engine")
+    engine_raw = dt.get("Engine") or sb.get("Engine")
     engine_spec = normalize_engine_spec(engine_raw) if engine_raw else None
     # Bare cylinder counts (``"6 Cylinder"``) get rejected by the normalizer.
     # Fall back to the raw string — dealers don't give displacement on JE.
     if not engine_spec and engine_raw:
         engine_spec = engine_raw.strip() or None
 
-    transmission = normalize_transmission(dt.get("Gearbox"))
-    mileage_mi = _parse_mileage(dt.get("Mileage"))
+    transmission = normalize_transmission(dt.get("Gearbox") or sb.get("Gearbox"))
+
+    mileage_mi = _parse_mileage(dt.get("Mileage") or sb.get("Mileage"))
 
     dealer_name = _extract_dealer_name(html)
     description = _extract_description(html)

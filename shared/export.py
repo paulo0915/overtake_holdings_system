@@ -68,6 +68,7 @@ def enrich_records(records: list[dict]) -> list[dict]:
         normalize_transmission,
         normalize_vin,
         parse_year_from_title,
+        strip_html,
     )
 
     for r in records:
@@ -101,6 +102,11 @@ def enrich_records(records: list[dict]) -> list[dict]:
             title_year = parse_year_from_title(title)
             if title_year and r.get("Year") != title_year:
                 r["Year"] = title_year
+
+        # Strip residual HTML tags from description — some scrapers receive raw
+        # HTML strings from APIs and may not fully clean them upstream.
+        if r.get("Listing_description"):
+            r["Listing_description"] = strip_html(r["Listing_description"])
 
     return records
 

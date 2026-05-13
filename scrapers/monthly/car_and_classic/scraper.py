@@ -69,7 +69,9 @@ class CarAndClassicScraper(BaseScraper):
 
             for row in sr.get("data") or []:
                 if isinstance(row, dict):
-                    summaries.append(parse_search_row(row))
+                    parsed = parse_search_row(row)
+                    if parsed is not None:
+                        summaries.append(parsed)
 
             for page in range(2, total_pages + 1):
                 await asyncio.sleep(REQUEST_DELAY_SECONDS + random.uniform(0.1, 0.45))
@@ -81,7 +83,9 @@ class CarAndClassicScraper(BaseScraper):
                 batch = (payload.get("props") or {}).get("searchResults", {}).get("data") or []
                 for row in batch:
                     if isinstance(row, dict):
-                        summaries.append(parse_search_row(row))
+                        parsed = parse_search_row(row)
+                        if parsed is not None:
+                            summaries.append(parsed)
                 logger.info("Results page %s/%s — %s rows", page, total_pages, len(summaries))
 
             logger.info("Collected %s list rows; fetching listing details…", len(summaries))

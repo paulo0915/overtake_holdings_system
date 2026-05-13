@@ -56,7 +56,7 @@ class VehicleFilter:
             make = self._normalize_make(make)
 
             # Check for "All models"
-            if model.lower() in ("all models", "all models"):
+            if model.lower() == "all models":
                 self.all_models_makes.add(make.lower())
                 continue
 
@@ -135,23 +135,61 @@ class VehicleFilter:
 
         return aliases
 
+    # Non-vehicle parts/accessories that may appear in auction catalogs.
+    # Titles containing these words are excluded even when a car make is present
+    # (e.g. "Porsche 911 Wheels Set" or "Ferrari Dino Engine for Parts").
+    _PARTS_KEYWORDS = re.compile(
+        r'\b(?:wheels?\s+(?:set|only|for\s+sale)|spare\s+(?:parts?|wheels?|engine)|'
+        r'(?:engine|gearbox|transmission)\s+(?:only|for\s+(?:sale|parts?))|'
+        r'parts?\s+car|automobilia|scale\s+model|brochure|poster|watch|'
+        r'helmet|racing\s+suit|steering\s+wheel\s+only|memorabilia|'
+        r'hub\s+caps?|alloys?\s+(?:set|only)|tyres?\s+(?:set|only)|'
+        r'tires?\s+(?:set|only))\b',
+        re.IGNORECASE,
+    )
+
     # Legitimate builders whose products contain exclusion keywords
-    # but are NOT replicas (e.g. "Singer" builds are called "recreations" but are original products)
-    _LEGITIMATE_BUILDERS = {"singer", "gma", "gordon murray"}
+    # but are NOT replicas (e.g. "Singer" builds are called "recreations" but are original products).
+    # Uses word-boundary regex to prevent "gma" from matching inside "gearbox" etc.
+    _LEGITIMATE_BUILDERS_RE = re.compile(
+        r'\b(?:singer|gma|gordon\s+murray)\b',
+        re.IGNORECASE,
+    )
+
+    # Keywords that definitively mark a listing as a boat/watercraft.
+    # Checked against title + description excerpt — prevents boats from slipping
+    # through when Make is None or not in NON_CAR_MAKES (e.g. custom-built hulls).
+    _BOAT_KEYWORDS = re.compile(
+        r'\b(?:yacht|speedboat|motorboat|sailboat|powerboat|catamaran|'
+        r'runabout|hydroplane|inboard|outboard\s+motor|hull\s+no|'
+        r'boat\s+(?:engine|hull|deck)|classic\s+boat|wooden\s+boat)\b',
+        re.IGNORECASE,
+    )
 
     def _check_exclusions(self, title: str, excerpt: str = "") -> bool:
         """Return True if listing should be excluded."""
         combined = f"{title} {excerpt}".lower()
 
-        # First check if this is a legitimate builder's product
-        is_legitimate = any(builder in combined for builder in self._LEGITIMATE_BUILDERS)
+        # Boat/watercraft keyword check (catches listings where Make isn't a known
+        # boat brand but the title/description clearly describes watercraft).
+        if self._BOAT_KEYWORDS.search(combined):
+            logger.debug("Rejected boat keyword in: %s", title[:80])
+            return True
+
+        # Parts/non-vehicle keyword check (wheels sets, engines-for-parts, memorabilia, etc.).
+        # Checked on combined text so excerpt can also catch parts listings.
+        if self._PARTS_KEYWORDS.search(combined):
+            logger.debug("Rejected parts keyword in: %s", title[:80])
+            return True
+
+        # Replica/kit-car exclusion — but don't exclude legitimate builder products
+        # (Singer, GMA/Gordon Murray) even when their descriptions use words like "recreation".
+        is_legitimate = bool(self._LEGITIMATE_BUILDERS_RE.search(combined))
 
         for kw in EXCLUSION_KEYWORDS:
             if kw in combined:
                 if is_legitimate:
                     # "Singer recreation" is a real Singer, don't exclude.
-                    # But "Singer replica by Joe's Garage" would also pass —
-                    # acceptable tradeoff since Singer replicas don't exist.
                     return False
                 return True
         return False

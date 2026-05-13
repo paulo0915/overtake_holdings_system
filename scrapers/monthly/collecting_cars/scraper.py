@@ -65,7 +65,9 @@ class CollectingCarsScraper(BaseScraper):
                 return [h.get("document") or {} for h in (payload.get("hits") or [])]
 
             for doc in _hits(first):
-                summaries.append(parse_typesense_document(doc))
+                parsed = parse_typesense_document(doc)
+                if parsed is not None:
+                    summaries.append(parsed)
 
             for page in range(2, total_pages + 1):
                 await asyncio.sleep(REQUEST_DELAY_SECONDS + random.uniform(0.1, 0.4))
@@ -77,12 +79,41 @@ class CollectingCarsScraper(BaseScraper):
                     logger.warning("Typesense page %s: %s — stopping", page, e)
                     break
                 for doc in _hits(payload):
-                    summaries.append(parse_typesense_document(doc))
+                    parsed = parse_typesense_document(doc)
+                    if parsed is not None:
+                        summaries.append(parsed)
                 logger.info("Typesense page %s/%s — %s rows", page, total_pages, len(summaries))
 
         if MAX_DETAILS > 0:
             summaries = summaries[:MAX_DETAILS]
             logger.info("COLLECTING_CARS_MAX_DETAILS=%s — capping listing fetches", MAX_DETAILS)
+
+        # Pre-filter before the expensive per-listing HTML fetch. Typesense already
+        # carries price and title, so we can discard listings that clearly won't pass
+        # the min-price floor or vehicle filter without making a single extra request.
+        _pre_len = len(summaries)
+        if self.min_price > 0:
+            # 70% floor gives ~30% FX headroom (GBP/EUR vs USD).
+            _price_floor = int(self.min_price * 0.70)
+            summaries = [
+                r for r in summaries
+                if r.get("amount_native") is None or (r.get("amount_native") or 0) >= _price_floor
+            ]
+        if self.vehicle_filter:
+            summaries = [
+                r for r in summaries
+                if self.vehicle_filter.match(r.get("title") or "", "")
+            ]
+        if len(summaries) < _pre_len:
+            logger.info("Pre-filter: %s → %s rows before HTML fetch", _pre_len, len(summaries))
+
+        # Hard cap: never HTML-fetch more than 150 listings regardless of min_price
+        # setting. Typesense returns price-desc order, so the cap keeps the highest-value
+        # listings and prevents runaway fetches when the price floor is low/zero.
+        _HTML_CAP = 150
+        if len(summaries) > _HTML_CAP:
+            summaries = summaries[:_HTML_CAP]
+            logger.info("HTML fetch capped at %d rows", _HTML_CAP)
 
         logger.info("Collected %s Typesense rows; fetching listing HTML…", len(summaries))
 

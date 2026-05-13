@@ -7,7 +7,7 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
-from shared.normalizer import normalize_transmission
+from shared.normalizer import KM_TO_MILES, normalize_transmission
 
 from .config import BASE_URL
 
@@ -28,6 +28,73 @@ _PLACEHOLDER_IMG_RE = re.compile(
     r"placeholder|loading\.png|/uploads/placeholder",
     re.IGNORECASE,
 )
+
+# Odometer patterns: "91k km (~56k miles)", "34,000 km", "56k miles", "91000"
+_ODOM_MILES_PAREN_RE = re.compile(r"\(~?([\d,.]+)\s*k?\s*miles?\)", re.I)
+_ODOM_K_RE = re.compile(r"([\d,.]+)\s*k(?!m)", re.I)
+_ODOM_NUM_RE = re.compile(r"[\d,]+")
+
+
+def _parse_mb_odometer(raw: str) -> int | None:
+    """Parse MB Market odometer string to miles.
+
+    Priority: parenthetical miles hint → explicit miles → km converted → plain number.
+    """
+    if not raw:
+        return None
+    s = raw.strip()
+
+    # "(~56k miles)" or "(56,000 miles)" — already in miles, most reliable
+    m = _ODOM_MILES_PAREN_RE.search(s)
+    if m:
+        num_str = m.group(1).replace(",", "")
+        try:
+            val = float(num_str)
+            if "k" in m.group(0).lower():
+                val *= 1000
+            return int(round(val))
+        except ValueError:
+            pass
+
+    s_lower = s.lower()
+    # Explicit "miles" keyword (no parenthetical)
+    if "mile" in s_lower and "km" not in s_lower:
+        m = _ODOM_K_RE.search(s)
+        if m:
+            try:
+                return int(round(float(m.group(1).replace(",", "")) * 1000))
+            except ValueError:
+                pass
+        m = _ODOM_NUM_RE.search(s)
+        if m:
+            try:
+                return int(m.group(0).replace(",", ""))
+            except ValueError:
+                pass
+
+    # km value — convert to miles
+    if "km" in s_lower:
+        m = _ODOM_K_RE.search(s)
+        if m:
+            try:
+                return int(round(float(m.group(1).replace(",", "")) * 1000 * KM_TO_MILES))
+            except ValueError:
+                pass
+        m = _ODOM_NUM_RE.search(s)
+        if m:
+            try:
+                return int(round(int(m.group(0).replace(",", "")) * KM_TO_MILES))
+            except ValueError:
+                pass
+
+    # Plain number fallback
+    m = _ODOM_NUM_RE.search(s)
+    if m:
+        try:
+            return int(m.group(0).replace(",", ""))
+        except ValueError:
+            pass
+    return None
 
 
 def _is_placeholder_image_url(url: str | None) -> bool:
@@ -184,10 +251,7 @@ def parse_detail_html(html: str | None) -> dict[str, Any]:
         mm, dd, yyyy = end_m.group(1).split("/")
         selling_date = f"{yyyy}-{mm}-{dd}"
 
-    odom_raw = (facts.get("odometer") or "").replace(",", "").strip()
-    mileage_mi: int | None = None
-    if odom_raw.isdigit():
-        mileage_mi = int(odom_raw)
+    mileage_mi = _parse_mb_odometer(facts.get("odometer"))
 
     engine = None
     for li in soup.select("ul.dashed li"):
