@@ -30,7 +30,9 @@ import argparse
 import logging
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -38,6 +40,18 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 logger = logging.getLogger(__name__)
+
+# Per-source wall-clock cap. Anything longer than this is almost certainly
+# stuck on a redirect loop, captcha, or a paginator that won't terminate.
+# Tune up if you legitimately have a source that needs > 30 min on a fresh
+# clone. Mecum + Worldwide were the longest at ~12 min in tests.
+_PER_SOURCE_TIMEOUT_S = 1800
+
+# Sane default for parallel scraping. The bottleneck is the network and the
+# remote sites' rate limits (each scraper has its own per-host concurrency
+# cap), not local CPU. 6 workers gives ~5x speedup vs sequential without
+# triggering shared-IP rate limits across sources.
+_DEFAULT_PARALLEL_WORKERS = 6
 
 # ---------------------------------------------------------------------------
 # Source definitions - (source_code, modes, description)
@@ -85,16 +99,18 @@ _CLASSIFIEDS_SOURCES = [
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _run_scraper(
+_print_lock = threading.Lock()
+
+
+def _build_cmd(
     source: str,
     mode: str | None,
     *,
     min_price: int | None,
     max_pages: int,
-    source_page_overrides: dict[str, int] | None = None,
+    source_page_overrides: dict[str, int] | None,
     extra_args: list[str],
-) -> tuple[int, float]:
-    """Run run_scraper.py for one source/mode. Returns (exit_code, elapsed_s)."""
+) -> list[str]:
     effective_pages = (source_page_overrides or {}).get(source, max_pages)
     cmd = [
         sys.executable,
@@ -107,20 +123,71 @@ def _run_scraper(
     if min_price is not None:
         cmd += ["--min-price", str(min_price)]
     cmd += extra_args
+    return cmd
 
+
+def _run_one(
+    source: str,
+    mode: str | None,
+    cmd: list[str],
+    *,
+    log_dir: Path,
+    sequential: bool,
+) -> tuple[str, int, float, Path]:
+    """Run one scraper subprocess. Returns (label, rc, elapsed, log_path).
+
+    In sequential mode, output streams to the parent terminal so a single
+    scrape feels interactive. In parallel mode, output is captured to a
+    per-source log file and only a one-line summary is printed on completion
+    — interleaving stdout from 6 subprocesses would be unreadable.
+    """
     label = f"{source}" + (f"/{mode}" if mode else "")
-    print(f"\n{'-' * 60}")
-    print(f"  >>  {label}")
-    print(f"{'-' * 60}")
-    logger.info("Starting: %s", " ".join(cmd))
-
+    log_path = log_dir / f"{label.replace('/', '-')}.log"
     t0 = time.time()
-    result = subprocess.run(cmd, cwd=str(ROOT))
-    elapsed = time.time() - t0
 
-    status = "OK" if result.returncode == 0 else f"FAILED (exit {result.returncode})"
-    print(f"\n  {status}  -  {elapsed:.0f}s")
-    return result.returncode, elapsed
+    if sequential:
+        with _print_lock:
+            print(f"\n{'-' * 60}\n  >>  {label}\n{'-' * 60}")
+        result = subprocess.run(
+            cmd, cwd=str(ROOT), timeout=_PER_SOURCE_TIMEOUT_S,
+        )
+        rc = result.returncode
+        log_path.write_text(
+            f"(sequential mode — output streamed to terminal)\n",
+            encoding="utf-8",
+        )
+    else:
+        with _print_lock:
+            print(f"  [start]  {label}")
+        try:
+            result = subprocess.run(
+                cmd, cwd=str(ROOT),
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace",
+                timeout=_PER_SOURCE_TIMEOUT_S,
+            )
+            rc = result.returncode
+            log_path.write_text(
+                f"$ {' '.join(cmd)}\n\n"
+                f"--- STDOUT ---\n{result.stdout}\n"
+                f"--- STDERR ---\n{result.stderr}\n",
+                encoding="utf-8",
+            )
+        except subprocess.TimeoutExpired as e:
+            rc = -1
+            log_path.write_text(
+                f"$ {' '.join(cmd)}\n\nTIMEOUT after {_PER_SOURCE_TIMEOUT_S}s\n"
+                f"Partial stdout:\n{(e.stdout or '').decode(errors='replace') if isinstance(e.stdout, bytes) else (e.stdout or '')}\n",
+                encoding="utf-8",
+            )
+
+    elapsed = time.time() - t0
+    status = "OK" if rc == 0 else (
+        "TIMEOUT" if rc == -1 else f"FAIL(exit {rc})"
+    )
+    with _print_lock:
+        print(f"  [{status:>8}]  {label:<22}  {elapsed:>5.0f}s   log: {log_path.name}")
+    return label, rc, elapsed, log_path
 
 
 def _reset_db() -> None:
@@ -210,6 +277,14 @@ def main() -> None:
         "--output-dir", type=str, default="output",
         help="Output directory for per-scraper CSVs and final export",
     )
+    parser.add_argument(
+        "--workers", type=int, default=_DEFAULT_PARALLEL_WORKERS,
+        help=(
+            f"Parallel scraper subprocesses (default {_DEFAULT_PARALLEL_WORKERS}). "
+            "Pass 1 to run sequentially with live terminal output. "
+            "Going above ~8 risks tripping shared-IP rate limits across sources."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -265,22 +340,43 @@ def main() -> None:
     print(f"\n  Min price : ${args.min_price:,}" if args.min_price else "\n  Min price : (config default)")
     print(f"  Max pages : {args.max_pages or 'unlimited'}")
     print(f"  Filter    : {'OFF' if args.no_filter else 'ON (default)'}")
+    print(f"  Workers   : {args.workers} ({'sequential' if args.workers == 1 else 'parallel'})")
     print()
 
     # -- 3. Execute --------------------------------------------------------
     wall_start = time.time()
     results: list[tuple[str, int, float]] = []
 
+    log_dir = ROOT / "output" / "scraper_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    sequential = args.workers <= 1
+    workers = max(1, args.workers)
+
+    # Build all commands up front so the executor sees one homogenous queue.
+    jobs = []
     for code, mode, _desc in plan:
-        rc, elapsed = _run_scraper(
+        cmd = _build_cmd(
             code, mode,
             min_price=args.min_price,
             max_pages=args.max_pages,
             source_page_overrides=source_page_overrides,
             extra_args=extra,
         )
-        label = f"{code}/{mode}" if mode else code
-        results.append((label, rc, elapsed))
+        jobs.append((code, mode, cmd))
+
+    print(f"  Streaming live output: {'YES' if sequential else 'NO (per-source logs in output/scraper_logs/)'}")
+    print()
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(_run_one, code, mode, cmd,
+                       log_dir=log_dir, sequential=sequential)
+            for code, mode, cmd in jobs
+        ]
+        for fut in as_completed(futures):
+            label, rc, elapsed, _log_path = fut.result()
+            results.append((label, rc, elapsed))
 
     # -- 4. Export final CSVs ---------------------------------------------
     if not args.no_export:

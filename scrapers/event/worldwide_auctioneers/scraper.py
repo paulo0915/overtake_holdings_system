@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 
 import httpx
 from curl_cffi.requests import AsyncSession
@@ -35,8 +34,8 @@ from shared.normalizer import get_scraped_at
 from shared.schemas import AUCTION_COLUMNS
 
 from . import record_builder
-from .api_client import fetch_inventory_html, fetch_product_html, post_car_search, warmup, fetch_results_html
-from .listing_parser import car_search_post_body, extract_product_urls_from_inventory, parse_car_search_results, parse_product_page
+from .api_client import fetch_product_html, post_car_search, warmup, fetch_results_html
+from .listing_parser import car_search_post_body, parse_car_search_results, parse_product_page
 
 logger = logging.getLogger(__name__)
 
@@ -89,54 +88,31 @@ class WorldwideAuctioneersScraper(BaseScraper):
                 rows = rows[: self.max_pages]
                 logger.info("Capped to %s lots for test run", len(rows))
 
-            # Fetch individual product pages for lots that have a product URL,
-            # to populate VIN, mileage, engine, transmission, and colors.
-            rows_with_url = [r for r in rows if r.get("product_url")]
-            if not rows_with_url:
-                # POST response embeds no /product/ links — fall back to the
-                # inventory grid (WooCommerce shop page) which lists product URLs
-                # that can be matched to lots by their title slug.
-                logger.info(
-                    "No product URLs in search results — fetching inventory grid for product links…"
-                )
-                try:
-                    inv_html = await fetch_inventory_html(session)
-                    product_urls = extract_product_urls_from_inventory(inv_html)
-                    logger.info("Inventory grid: %s product URLs found", len(product_urls))
-                    if product_urls:
-                        slug_to_url: dict[str, str] = {}
-                        for pu in product_urls:
-                            ps = pu.rstrip("/").rsplit("/", 1)[-1]
-                            slug_to_url[ps] = pu
-                        matched = 0
-                        for row in rows:
-                            title_slug = re.sub(
-                                r"[^a-z0-9]+", "-", row["title"].lower()
-                            ).strip("-")
-                            if title_slug in slug_to_url:
-                                row["product_url"] = slug_to_url[title_slug]
-                                matched += 1
-                                continue
-                            # Prefix match: product slug may have a lot-number suffix
-                            prefix = title_slug[:40]
-                            for ps, pu in slug_to_url.items():
-                                if ps.startswith(prefix) or prefix.startswith(ps[:40]):
-                                    row["product_url"] = pu
-                                    matched += 1
-                                    break
-                        logger.info(
-                            "Matched %s/%s lot rows to product URLs via inventory grid",
-                            matched, len(rows),
-                        )
-                except Exception as e:
-                    logger.warning("Inventory grid fetch failed: %s", e)
-
-                rows_with_url = [r for r in rows if r.get("product_url")]
-                if not rows_with_url:
-                    logger.info(
-                        "No product URLs resolved — detail fields (VIN, engine, etc.) will be empty"
+            # Pre-filter by min-price BEFORE any per-lot fetching. The search
+            # response carries the hammer ``price`` per row for sold lots, so
+            # we can drop sub-floor rows up-front. Unsold/no-price-disclosed
+            # rows are kept (the post-filter at the end handles them).
+            if self.min_price > 0:
+                before = len(rows)
+                rows = [
+                    r for r in rows
+                    if (
+                        not r.get("sold")  # keep unsold/no-price rows for post-filter
+                        or r.get("price") is None
+                        or (isinstance(r.get("price"), int) and r["price"] >= self.min_price)
                     )
+                ]
+                logger.info(
+                    "Pre-filter min-price ($%s): %s -> %s lots",
+                    f"{self.min_price:,}", before, len(rows),
+                )
 
+            # Fetch detail pages only for rows whose product_url was already
+            # populated by the search response. We do NOT slug-match against
+            # the /inventory/ grid: it only ever exposes ~30 currently-active
+            # listings (~5/100 hit rate on past lots last measured), so the
+            # round-trip cost wasn't justified by the data it returned.
+            rows_with_url = [r for r in rows if r.get("product_url")]
             if rows_with_url:
                 logger.info(
                     "Fetching product pages for %s/%s lots with known URLs…",
@@ -161,6 +137,13 @@ class WorldwideAuctioneersScraper(BaseScraper):
                             )
 
                 await asyncio.gather(*(_fetch_product(r) for r in rows_with_url))
+            else:
+                logger.info(
+                    "No product URLs in search response - detail fields (VIN, "
+                    "engine, etc.) will be empty for all rows. This is expected "
+                    "for past Worldwide auctions; only the search summary is "
+                    "available for delisted lots."
+                )
 
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as fx_client:
             fx = FXConverter(fx_client)

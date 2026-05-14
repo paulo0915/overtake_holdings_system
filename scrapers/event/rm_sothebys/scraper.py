@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from datetime import datetime, timezone
 
 import httpx
 
@@ -96,6 +97,13 @@ class RMSothebysScraper(BaseScraper):
 
         async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT) as client:
 
+            # FX converter is shared between the early-stop loop (below) and the
+            # final record builder. Created up-front so the per-page early-stop
+            # check can convert local-currency lot prices to USD inline before
+            # comparing against ``self.min_price``. Caches rates per (date,
+            # currency) so a 40-row page typically warms one rate then reuses it.
+            fx = FXConverter(client)
+
             # --- Step 1: discover auctions ------------------------------------
             auctions: list[dict] = []
             if self.mode == "upcoming":
@@ -137,6 +145,23 @@ class RMSothebysScraper(BaseScraper):
                     kept = [it for it in items if is_vehicle_lot(it)]
                     per_auction_items.extend(kept)
                     logger.info("  Page %s: %s items (%s vehicles)", page, len(items), len(kept))
+
+                    # Early-stop: SortBy=Value is descending, so once the
+                    # highest USD-equivalent price on a full page falls below
+                    # ``min_price`` every later page in this auction is too.
+                    # Local prices are FX-converted inline (USD lots are a
+                    # no-op; EUR/GBP/CHF are looked up against today's rate
+                    # via FXConverter's cache).
+                    if self.min_price > 0 and kept and len(items) >= DEFAULT_PAGE_SIZE:
+                        page_max_usd = await self._page_max_usd(fx, kept, date)
+                        if page_max_usd is not None and page_max_usd < self.min_price:
+                            logger.info(
+                                "  Page %s top USD price ($%s) < floor ($%s) - "
+                                "early stop for auction %s",
+                                page, f"{page_max_usd:,}",
+                                f"{self.min_price:,}", code,
+                            )
+                            break
 
                     if len(items) < DEFAULT_PAGE_SIZE:
                         break
@@ -187,7 +212,7 @@ class RMSothebysScraper(BaseScraper):
             logger.info("Collected %s merged vehicle rows — building records", len(merged_rows))
 
             # --- Step 4: records + price filter + export -----------------------
-            fx = FXConverter(client)
+            # ``fx`` already created at the top of run() for the early-stop loop.
             scraped_at = get_scraped_at()
             records = await record_builder.build_records(
                 merged_rows, fx, self.vehicle_filter, scraped_at, mode=self.mode,
@@ -277,6 +302,44 @@ class RMSothebysScraper(BaseScraper):
             return int(usd) >= self.min_price
         except (TypeError, ValueError):
             return False
+
+    async def _page_max_usd(
+        self, fx: FXConverter, items: list[dict], auction_date: str | None,
+    ) -> int | None:
+        """Highest USD-equivalent price across one page of SearchLots items.
+
+        Used by the per-auction early-stop check. Walks each item, parses its
+        local-currency value via ``parse_value_fields``, FX-converts to USD,
+        and returns the maximum. Returns ``None`` if no item on the page has
+        a parseable price (e.g. an auction whose lots are all "Reserve Met"
+        with no public hammer) — caller treats that as "don't early-stop".
+        """
+        from .listing_parser import parse_value_fields
+        date_str = auction_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        best: int | None = None
+        for it in items:
+            vf = parse_value_fields(
+                str(it.get("value") or ""),
+                str(it.get("valueType") or ""),
+                it.get("sold"),
+                str(it.get("preSaleEstimate") or ""),
+            )
+            # Prefer the realised hammer; fall back to the high estimate so
+            # we don't break out of an auction just because nothing has sold
+            # yet (also covers ``StillForSaleOnly`` runs).
+            local = vf.get("selling_price") or vf.get("estimate_high") or vf.get("estimate_low")
+            if local is None:
+                continue
+            currency = (vf.get("currency") or "USD").upper()
+            try:
+                usd, _rate = await fx.convert_to_usd(int(local), currency, date_str)
+            except Exception:
+                continue
+            if usd is None:
+                continue
+            if best is None or int(usd) > best:
+                best = int(usd)
+        return best
 
 
 def _extract_items(payload: dict) -> list[dict]:

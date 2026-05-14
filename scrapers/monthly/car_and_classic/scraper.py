@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from datetime import datetime, timezone
 
 import httpx
 
@@ -49,8 +50,30 @@ class CarAndClassicScraper(BaseScraper):
                 logger.error("Bootstrap failed: %s", e)
                 return []
 
+            # Translate the USD floor to the GBP-pence value the API expects.
+            # The /us/search response prices come back as GBP-pence regardless
+            # of the /us/ prefix, so the ``min_price`` filter is also GBP-pence.
+            # We convert once up front using today's rate; the post-filter
+            # below then re-checks each row at its own selling-date rate, so
+            # any pre-filter slop (cars priced very near the floor a long time
+            # ago) is caught on the second pass.
+            min_price_minor = 0
+            if self.min_price > 0:
+                fx_pre = FXConverter(client)
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                gbp_per_usd = 1.0 / await fx_pre.get_rate(today, "GBP")  # rate is GBP->USD
+                min_price_minor = int(self.min_price * gbp_per_usd * 100)
+                logger.info(
+                    "min_price USD $%s -> GBP £%s (~%s pence) at today's rate",
+                    f"{self.min_price:,}",
+                    f"{int(self.min_price * gbp_per_usd):,}",
+                    f"{min_price_minor:,}",
+                )
+
             try:
-                first = await api_client.fetch_results_page(client, page=1)
+                first = await api_client.fetch_results_page(
+                    client, page=1, min_price_minor=min_price_minor,
+                )
             except CarAndClassicApiError as e:
                 logger.error("Results page 1 failed: %s", e)
                 return []
@@ -76,7 +99,9 @@ class CarAndClassicScraper(BaseScraper):
             for page in range(2, total_pages + 1):
                 await asyncio.sleep(REQUEST_DELAY_SECONDS + random.uniform(0.1, 0.45))
                 try:
-                    payload = await api_client.fetch_results_page(client, page=page)
+                    payload = await api_client.fetch_results_page(
+                        client, page=page, min_price_minor=min_price_minor,
+                    )
                 except CarAndClassicApiError as e:
                     logger.warning("Results page %s: %s — stopping pagination", page, e)
                     break

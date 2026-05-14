@@ -18,7 +18,10 @@ ALGOLIA_AGENT = (
 )
 
 LOT_INDEX_NAME = "wp_posts_lot_highest_bid_desc"
-HITS_PER_PAGE = 24
+# Algolia caps at 1000; the browser uses 24. Bumping to 96 cuts the
+# /queries round-trip count by 4x (~9,200 pages -> ~2,300) while still
+# fitting comfortably in one response payload.
+HITS_PER_PAGE = 96
 
 # Mirrors the site filter: past / ended lots with sold facet + time window.
 def run_date_timestamp_ceiling() -> int:

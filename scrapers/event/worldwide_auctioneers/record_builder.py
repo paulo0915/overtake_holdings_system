@@ -90,7 +90,12 @@ async def build_records(
                 "Auction_event": event or None,
                 "Country": "USA",
                 "Image_url": m.get("image_url"),
-                "Listing_url": "https://listings.worldwideauctioneers.com/results/",
+                # Worldwide's catalog API doesn't expose per-lot URLs (the
+                # search-results page is the same for every lot). Append the
+                # internal record_id as a URL fragment so the DB upsert key
+                # stays unique per row. The fragment is invisible to the
+                # server and visually identical when a user clicks through.
+                "Listing_url": f"https://listings.worldwideauctioneers.com/results/#lot-{rid}",
                 "Source": "listings.worldwideauctioneers.com",
                 "Listing_description": None,
                 "Scraped_at": scraped_at,

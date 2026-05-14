@@ -244,6 +244,32 @@ def parse_vehicle_paths_from_results(html: str | None) -> list[str]:
     return out
 
 
+def max_card_price_usd_from_results(html: str | None) -> int | None:
+    """Return the highest USD price visible across all cards on a results page.
+
+    Each card holds a ``<span id="convert_price">`` whose body is either a
+    single hammer (``$X,XXX``) or an estimate range (``$X,XXX - $Y,YYY``).
+    For ranges we take the high end. Returns ``None`` if no parseable
+    prices appear (e.g. all cards show ``Withdrawn`` / ``Reserve Pending``).
+    """
+    if not html:
+        return None
+    best: int | None = None
+    for m in _CONVERT_PRICE_FULL_RE.finditer(html):
+        body = html_lib.unescape(m.group(1)).strip()
+        # Pull every ``$N,NNN`` token and take the largest within this card.
+        amounts = [
+            int(p.replace(",", ""))
+            for p in re.findall(r"\$([\d,]+)", body)
+        ]
+        if not amounts:
+            continue
+        card_max = max(amounts)
+        if best is None or card_max > best:
+            best = card_max
+    return best
+
+
 def next_results_page_url(html: str | None) -> str | None:
     """Return the absolute URL from ``rel=next`` if present."""
     if not html:

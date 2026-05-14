@@ -18,6 +18,7 @@ from .config import (
     INERTIA_SEARCH_COMPONENT,
     LISTING_PARTIAL_DATA,
     RESULTS_REFERER,
+    SEARCH_BASE_PARAMS,
     SEARCH_PARTIAL_DATA,
     SITE_ORIGIN,
 )
@@ -117,11 +118,25 @@ async def bootstrap_inertia(client: httpx.AsyncClient) -> str:
     wait=wait_exponential(multiplier=1, min=1, max=15),
     retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError)),
 )
-async def fetch_results_page(client: httpx.AsyncClient, *, page: int) -> dict[str, Any]:
+async def fetch_results_page(
+    client: httpx.AsyncClient,
+    *,
+    page: int,
+    min_price_minor: int = 0,
+) -> dict[str, Any]:
+    """Fetch one Inertia results page.
+
+    ``min_price_minor`` is sent as the ``min_price`` query param in the
+    site's MINOR currency unit (GBP-pence). Caller is responsible for
+    converting from USD if needed — this layer is currency-agnostic.
+    """
     referer = f"{RESULTS_REFERER}?page={page}" if page > 1 else RESULTS_REFERER
+    params: dict[str, str | int] = {**SEARCH_BASE_PARAMS, "page": page}
+    if min_price_minor > 0:
+        params["min_price"] = int(min_price_minor)
     r = await client.get(
         AUCTION_RESULTS_URL,
-        params={"page": page},
+        params=params,
         headers=_inertia_headers(
             client,
             component=INERTIA_SEARCH_COMPONENT,

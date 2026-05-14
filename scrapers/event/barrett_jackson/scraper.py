@@ -84,7 +84,27 @@ class BarrettJacksonScraper(BaseScraper):
                     if row:
                         rows.append(row)
 
+            def _page_all_below_floor(data: dict) -> bool:
+                """Sort is ``price_desc`` and prices are USD on this source,
+                so once a page's highest hammer is below ``min_price``, every
+                later page is too. Returns True only when min_price > 0 and
+                no item on the page reaches the floor (skips items with no
+                price_decimal — those are TBD/no-sale lots that get sorted
+                to the tail by the API).
+                """
+                if self.min_price <= 0:
+                    return False
+                items = data.get("data") or []
+                for item in items:
+                    p = ((item.get("attributes") or {}).get("price_decimal"))
+                    if isinstance(p, (int, float)) and p >= self.min_price:
+                        return False
+                return bool(items)  # don't claim "below floor" on empty pages
+
             _append_page(first)
+            if _page_all_below_floor(first):
+                logger.info("Page 1 already below min-price floor - stopping")
+                max_page = 1
 
             for page in range(2, max_page + 1):
                 await asyncio.sleep(REQUEST_DELAY_SECONDS + random.uniform(0.1, 0.45))
@@ -101,6 +121,12 @@ class BarrettJacksonScraper(BaseScraper):
                     logger.warning("API page %s: %s - stopping pagination", page, e)
                     break
                 _append_page(data)
+                if _page_all_below_floor(data):
+                    logger.info(
+                        "Page %s all below $%s floor - early stop (saved %s pages)",
+                        page, f"{self.min_price:,}", max_page - page,
+                    )
+                    break
                 if page % 10 == 0 or page == max_page:
                     logger.info("Fetched page %s/%s - %s lots", page, max_page, len(rows))
 

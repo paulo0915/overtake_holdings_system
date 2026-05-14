@@ -70,6 +70,25 @@ def _sold_lots_request_body(page: int) -> dict[str, Any]:
                 "query": "",
                 "ruleContexts": ["pin_items"],
             },
+            # Companion facet-count query that the browser sends alongside the
+            # main hits query (Algolia InstantSearch pattern). Mirroring the
+            # real DevTools payload keeps the request shape identical to a
+            # genuine browser session, which makes the price-sorted hit order
+            # in the first response stable across pages.
+            {
+                "indexName": LOT_INDEX_NAME,
+                "analytics": False,
+                "clickAnalytics": False,
+                "facets": "taxonomies.sale_result.name",
+                "filters": filters,
+                "highlightPostTag": "__/ais-highlight__",
+                "highlightPreTag": "__ais-highlight__",
+                "hitsPerPage": 0,
+                "maxValuesPerFacet": 1000,
+                "page": 0,
+                "query": "",
+                "ruleContexts": ["pin_items"],
+            },
         ],
     }
 

@@ -596,6 +596,33 @@ def main() -> None:
         records = asyncio.run(scraper.run())
         listing_segment = None if as24_mode == "all" else as24_mode
 
+    # ── Phase-1 gate: row count + field-coverage regression check ─────────
+    # Runs BEFORE the DB write so a bad scrape can't silently overwrite good
+    # data. Set OVERTAKE_SKIP_COVERAGE=1 to bypass (rare — e.g., intentional
+    # narrow re-run with --only-make).
+    import os as _os
+    if records and not _os.environ.get("OVERTAKE_SKIP_COVERAGE"):
+        from shared.coverage_check import check_and_update_baseline, CoverageRegression
+        from shared.schemas import AUCTION_COLUMNS, CLASSIFIEDS_COLUMNS
+        cols = (
+            CLASSIFIEDS_COLUMNS if args.source in CLASSIFIEDS_SOURCES
+            else AUCTION_COLUMNS
+        )
+        try:
+            check_and_update_baseline(
+                source=args.source, records=records, columns=cols,
+            )
+        except CoverageRegression as e:
+            print(f"\n[FAIL] {e}\n")
+            print(
+                "Aborting before DB write — investigate the source change "
+                "above before re-running. To override (only when you have "
+                "manually confirmed the new shape is correct), delete the "
+                f"`{args.source}` entry in assets/coverage_baseline.json or "
+                "set OVERTAKE_SKIP_COVERAGE=1."
+            )
+            sys.exit(2)
+
     # DB write is the default. Use --no-store-db to skip (e.g. for dry-run checks).
     if records and not args.no_store_db:
         if args.source in CLASSIFIEDS_SOURCES:

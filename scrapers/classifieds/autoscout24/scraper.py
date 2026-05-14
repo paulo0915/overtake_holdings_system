@@ -103,6 +103,14 @@ class AutoScout24Scraper(BaseScraper):
             user_cap = min(user_cap, HARD_PAGE_CAP)
             pages_to_scan = user_cap
 
+            # FX converter is also used inline below for the early-stop check
+            # so we instantiate it before the pagination loop. ``min_price`` on
+            # this source is USD; list rows are EUR/GBP/CHF/etc. so we have to
+            # convert each row to USD before comparing — but only when the
+            # caller actually set a non-zero floor (saves FX calls on dev runs
+            # with --min-price 0).
+            fx = FXConverter(client)
+
             for page in range(1, user_cap + 1):
                 if page > pages_to_scan:
                     break
@@ -137,6 +145,7 @@ class AutoScout24Scraper(BaseScraper):
                     break
 
                 kept = 0
+                page_max_usd = 0  # for early-stop: highest USD price seen on this page
                 for item in items:
                     row = parse_list_item(item)
                     if not row:
@@ -147,8 +156,30 @@ class AutoScout24Scraper(BaseScraper):
                             continue
                     flats.append(row)
                     kept += 1
+                    if self.min_price > 0:
+                        amt = row.get("asking_price")
+                        cur = row.get("currency") or "EUR"
+                        if amt is not None:
+                            try:
+                                usd, _ = await fx.convert_to_usd(amt, cur, None)
+                                if usd is not None and usd > page_max_usd:
+                                    page_max_usd = int(usd)
+                            except Exception:
+                                pass
 
                 logger.info("Page %s: %s listings, %s kept (total %s)", page, len(items), kept, len(flats))
+
+                # Sort is price DESC, so once the highest USD price on a full
+                # page falls below the floor every subsequent page will too.
+                # Apply only when the page yielded items with usable prices —
+                # don't break on a page where every row failed FX lookup.
+                if self.min_price > 0 and page_max_usd and page_max_usd < self.min_price:
+                    logger.info(
+                        "Page %s top USD price ($%s) below floor ($%s) - early stop",
+                        page, f"{page_max_usd:,}", f"{self.min_price:,}",
+                    )
+                    break
+
                 await asyncio.sleep(REQUEST_DELAY_SECONDS * 0.35 + random.uniform(0.05, 0.25))
 
             logger.info("Collected %s cards — fetching details", len(flats))
@@ -174,7 +205,7 @@ class AutoScout24Scraper(BaseScraper):
 
             await asyncio.gather(*(one(c) for c in flats))
 
-            fx = FXConverter(client)
+            # ``fx`` already created before pagination loop for inline early-stop FX
             records: list[dict] = []
             for card in flats:
                 d = details.get(card["record_id"]) or {}

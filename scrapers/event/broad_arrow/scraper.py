@@ -39,6 +39,7 @@ from .api_client import (
 from .config import SITE_ORIGIN
 from .listing_parser import (
     extract_event_slug,
+    max_card_price_usd_from_results,
     next_results_page_url,
     parse_branch_results_url_from_event,
     parse_event_meta_from_html,
@@ -259,6 +260,21 @@ class BroadArrowScraper(BaseScraper):
                             page, len(paths), new, len(all_paths))
                 if not paths or not next_results_page_url(res_html):
                     break
+                # Early-stop: results are sorted ``sales_price.desc`` and prices
+                # on the cards are pre-converted to USD by Broad Arrow's
+                # ``convert_price`` widget — so once the highest USD price on a
+                # full page falls below the floor every later page in this
+                # branch is below it too. Skips the per-vehicle detail crawl
+                # for tens of pages of cheap lots when ``min_price`` is set.
+                if self.min_price > 0:
+                    page_max = max_card_price_usd_from_results(res_html)
+                    if page_max is not None and page_max < self.min_price:
+                        logger.info(
+                            "  Page %s top USD price ($%s) < floor ($%s) - "
+                            "early stop (skipping deeper pages of this branch)",
+                            page, f"{page_max:,}", f"{self.min_price:,}",
+                        )
+                        break
                 page += 1
             logger.info("  Event done: %s vehicle paths across %s result page(s)",
                         event_paths_count, page)
