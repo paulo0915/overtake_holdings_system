@@ -41,12 +41,6 @@ sys.path.insert(0, str(ROOT))
 
 logger = logging.getLogger(__name__)
 
-# Per-source wall-clock cap. Anything longer than this is almost certainly
-# stuck on a redirect loop, captcha, or a paginator that won't terminate.
-# Tune up if you legitimately have a source that needs > 30 min on a fresh
-# clone. Mecum + Worldwide were the longest at ~12 min in tests.
-_PER_SOURCE_TIMEOUT_S = 1800
-
 # Sane default for parallel scraping. The bottleneck is the network and the
 # remote sites' rate limits (each scraper has its own per-host concurrency
 # cap), not local CPU. 6 workers gives ~5x speedup vs sequential without
@@ -133,6 +127,7 @@ def _run_one(
     *,
     log_dir: Path,
     sequential: bool,
+    env: dict[str, str] | None = None,
 ) -> tuple[str, int, float, Path]:
     """Run one scraper subprocess. Returns (label, rc, elapsed, log_path).
 
@@ -148,9 +143,7 @@ def _run_one(
     if sequential:
         with _print_lock:
             print(f"\n{'-' * 60}\n  >>  {label}\n{'-' * 60}")
-        result = subprocess.run(
-            cmd, cwd=str(ROOT), timeout=_PER_SOURCE_TIMEOUT_S,
-        )
+        result = subprocess.run(cmd, cwd=str(ROOT), env=env)
         rc = result.returncode
         log_path.write_text(
             f"(sequential mode — output streamed to terminal)\n",
@@ -159,32 +152,26 @@ def _run_one(
     else:
         with _print_lock:
             print(f"  [start]  {label}")
-        try:
-            result = subprocess.run(
-                cmd, cwd=str(ROOT),
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace",
-                timeout=_PER_SOURCE_TIMEOUT_S,
-            )
-            rc = result.returncode
-            log_path.write_text(
-                f"$ {' '.join(cmd)}\n\n"
-                f"--- STDOUT ---\n{result.stdout}\n"
-                f"--- STDERR ---\n{result.stderr}\n",
-                encoding="utf-8",
-            )
-        except subprocess.TimeoutExpired as e:
-            rc = -1
-            log_path.write_text(
-                f"$ {' '.join(cmd)}\n\nTIMEOUT after {_PER_SOURCE_TIMEOUT_S}s\n"
-                f"Partial stdout:\n{(e.stdout or '').decode(errors='replace') if isinstance(e.stdout, bytes) else (e.stdout or '')}\n",
-                encoding="utf-8",
-            )
+        # No subprocess timeout: full archive scrapes (Mecum: 220k lots,
+        # BaT: 10k detail fetches, Gooding: 9k lots) legitimately take
+        # hours. Hung scrapers are caught by their own internal HTTP
+        # timeouts + retry policies, not a wall-clock cap here.
+        result = subprocess.run(
+            cmd, cwd=str(ROOT),
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+        rc = result.returncode
+        log_path.write_text(
+            f"$ {' '.join(cmd)}\n\n"
+            f"--- STDOUT ---\n{result.stdout}\n"
+            f"--- STDERR ---\n{result.stderr}\n",
+            encoding="utf-8",
+        )
 
     elapsed = time.time() - t0
-    status = "OK" if rc == 0 else (
-        "TIMEOUT" if rc == -1 else f"FAIL(exit {rc})"
-    )
+    status = "OK" if rc == 0 else f"FAIL(exit {rc})"
     with _print_lock:
         print(f"  [{status:>8}]  {label:<22}  {elapsed:>5.0f}s   log: {log_path.name}")
     return label, rc, elapsed, log_path
@@ -285,7 +272,24 @@ def main() -> None:
             "Going above ~8 risks tripping shared-IP rate limits across sources."
         ),
     )
+    parser.add_argument(
+        "--coverage-check", action="store_true",
+        help=(
+            "Enable the field-coverage / row-count gate before each DB write. "
+            "OFF by default for full runs because the seeded baselines were "
+            "captured at one min_price/mode and false-trip on different "
+            "populations. Use it on incremental small runs where the "
+            "population matches the baseline."
+        ),
+    )
     args = parser.parse_args()
+
+    # Create output dirs BEFORE the FileHandler tries to open the log file —
+    # the handler crashes during basicConfig() if the parent dir doesn't
+    # exist yet. Create both the hardcoded ``output/`` (for the run-wide log)
+    # and the user-supplied ``--output-dir`` (for per-scraper CSVs).
+    (ROOT / "output").mkdir(parents=True, exist_ok=True)
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -295,12 +299,20 @@ def main() -> None:
             logging.FileHandler(ROOT / "output" / f"run_all_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.log", encoding="utf-8"),
         ],
     )
-    (ROOT / "output").mkdir(exist_ok=True)
 
     only = set(args.only) if args.only else None
     skip = set(args.skip) if args.skip else set()
     extra = ["--no-filter"] if args.no_filter else []
     extra += ["--output-dir", args.output_dir]
+
+    # Coverage gate: OFF by default for run_all (full archive runs span
+    # populations the seeded baselines weren't captured against, so the
+    # gate false-trips). Caller opts in with --coverage-check; we forward
+    # via env var because run_scraper.py reads OVERTAKE_SKIP_COVERAGE.
+    import os as _os
+    subprocess_env = dict(_os.environ)
+    if not args.coverage_check:
+        subprocess_env["OVERTAKE_SKIP_COVERAGE"] = "1"
     source_page_overrides: dict[str, int] = {}
     if args.gooding_pages is not None:
         source_page_overrides["gooding"] = args.gooding_pages
@@ -341,6 +353,7 @@ def main() -> None:
     print(f"  Max pages : {args.max_pages or 'unlimited'}")
     print(f"  Filter    : {'OFF' if args.no_filter else 'ON (default)'}")
     print(f"  Workers   : {args.workers} ({'sequential' if args.workers == 1 else 'parallel'})")
+    print(f"  Coverage  : {'ON' if args.coverage_check else 'OFF (default for full runs)'}")
     print()
 
     # -- 3. Execute --------------------------------------------------------
@@ -371,7 +384,8 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
             pool.submit(_run_one, code, mode, cmd,
-                       log_dir=log_dir, sequential=sequential)
+                       log_dir=log_dir, sequential=sequential,
+                       env=subprocess_env)
             for code, mode, cmd in jobs
         ]
         for fut in as_completed(futures):

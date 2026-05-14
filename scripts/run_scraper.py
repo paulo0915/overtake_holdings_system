@@ -624,9 +624,18 @@ def main() -> None:
             sys.exit(2)
 
     # DB write is the default. Use --no-store-db to skip (e.g. for dry-run checks).
+    # Failures here exit 3 (not 0) so the orchestrator marks the source as FAIL
+    # rather than silently OK. Per-source CSV is already written by this point —
+    # data isn't lost, but the summary will flag that the DB is out-of-sync.
+    db_failed = False
     if records and not args.no_store_db:
         if args.source in CLASSIFIEDS_SOURCES:
-            _store_classifieds(records, args.source, listing_segment=listing_segment)
+            try:
+                _store_classifieds(records, args.source, listing_segment=listing_segment)
+            except Exception as e:
+                logging.getLogger(__name__).error("Supabase classifieds upsert failed: %s", e)
+                print(f"Supabase upsert FAILED: {e}")
+                db_failed = True
         else:
             from shared.db import insert_auction_records
             try:
@@ -635,10 +644,13 @@ def main() -> None:
             except Exception as e:
                 logging.getLogger(__name__).error("Supabase insert failed: %s", e)
                 print(f"Supabase insert FAILED: {e}")
+                db_failed = True
     elif args.no_store_db:
         print("Skipped Supabase write (--no-store-db)")
 
     print(f"\nDone! {len(records)} records exported to {args.output_dir}/")
+    if db_failed:
+        sys.exit(3)
 
 
 if __name__ == "__main__":
