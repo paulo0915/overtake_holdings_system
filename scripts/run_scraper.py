@@ -62,8 +62,8 @@ Usage:
 import asyncio
 import argparse
 import logging
+import os
 import sys
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # Force UTF-8 on Windows console so Unicode characters in log messages (→, —, etc.)
@@ -89,9 +89,6 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 LOG_DIR = PROJECT_ROOT / "logs"
-LOG_FILE = LOG_DIR / "scraper.log"
-LOG_MAX_BYTES = 5 * 1024 * 1024
-LOG_BACKUP_COUNT = 5
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -106,9 +103,15 @@ def setup_logging(verbose: bool = False) -> None:
     console.setFormatter(logging.Formatter(fmt))
     root.addHandler(console)
 
-    file_handler = RotatingFileHandler(
-        LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8",
-    )
+    # Per-process log file. The previous shared ``scraper.log`` +
+    # RotatingFileHandler triggered Windows ``WinError 32`` whenever two
+    # parallel subprocesses tried to rename the same file at rotation time.
+    # Each scraper now writes its own file (filename includes pid), and we
+    # use a plain ``FileHandler`` so there is no rotation rename to race on.
+    # Per-source human-readable summary lives in ``output/scraper_logs/``;
+    # this ``logs/`` directory is the verbose debug stream.
+    log_file = LOG_DIR / f"scraper-{os.getpid()}.log"
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setFormatter(logging.Formatter(fmt))
     root.addHandler(file_handler)
 

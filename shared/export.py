@@ -128,7 +128,11 @@ def _build_dataframe(records: list[dict], columns: list[str]) -> pd.DataFrame:
     )]
     for col in int_cols:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+            # ``.astype("Int64")`` does a SAFE cast that raises on fractional
+            # values. Mileage in particular often arrives as ``62137.119``
+            # after km->miles conversion, so we must round first.
+            numeric = pd.to_numeric(df[col], errors="coerce").round()
+            df[col] = numeric.astype("Int64")
 
     float_cols = [c for c in columns if c in (
         "Selling_price_USD", "Asking_price_USD", "FX_rate_used",

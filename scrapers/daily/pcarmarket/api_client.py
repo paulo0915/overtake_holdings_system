@@ -14,15 +14,22 @@ from .config import PCAR_API_BASE, PCAR_BASE_URL, PCAR_RESULTS_PER_PAGE
 
 logger = logging.getLogger(__name__)
 
-# Transient failures on one page used to silently truncate the scrape. Retry
-# 3× with exponential backoff before giving up on a page.
+# PCarMarket's list endpoint occasionally takes 30-60s under load (their API
+# fans out to several backend services). 3 retries × 12s max wait wasn't
+# enough — full runs failed with ReadTimeout after exhausting all attempts.
+# Bumped to 5 retries, 30s ceiling on backoff.
 _RETRY = dict(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=12),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
     retry=retry_if_exception_type(
         (httpx.HTTPStatusError, httpx.TransportError, httpx.TimeoutException),
     ),
 )
+
+# Generous per-call timeout — list pages can legitimately take ~45s to come
+# back during evening/EU traffic spikes. The retry policy above handles the
+# rare case where even 90s isn't enough.
+_LIST_PAGE_TIMEOUT = 90.0
 
 
 @retry(**_RETRY)
@@ -37,7 +44,7 @@ async def _fetch_list_page(
             "sort_by": "price_high", "make": "all", "series": "all",
         },
         headers=get_headers(referer=f"{PCAR_BASE_URL}/results"),
-        timeout=REQUEST_TIMEOUT,
+        timeout=_LIST_PAGE_TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()

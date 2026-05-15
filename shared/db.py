@@ -54,9 +54,22 @@ def insert_auction_records(records: list[dict]) -> int:
     allowed = set(AUCTION_COLUMNS) - {"Record_ID"}
     valid: list[dict] = []
     dropped_no_url = 0
+    dropped_no_title = 0
     for r in records:
         if not r.get("Listing_url"):
             dropped_no_url += 1
+            continue
+        # The auctions table has a NOT NULL constraint on ``title``. A single
+        # null-title row in a batch makes Postgres reject the entire upsert
+        # (transactional). Skip + log instead so one malformed parse from
+        # one auction can't block the rest of the run.
+        title = r.get("Title")
+        if not title or not str(title).strip():
+            dropped_no_title += 1
+            logger.debug(
+                "Dropped null-title row from upsert: url=%s lot=%s",
+                r.get("Listing_url"), r.get("Lot_number"),
+            )
             continue
         valid.append({k.lower(): r.get(k) for k in allowed})
 
@@ -64,6 +77,12 @@ def insert_auction_records(records: list[dict]) -> int:
         logger.warning(
             "Dropped %s record(s) with no Listing_url (cannot upsert without "
             "the conflict key)", dropped_no_url,
+        )
+    if dropped_no_title:
+        logger.warning(
+            "Dropped %s record(s) with null Title (NOT NULL constraint on "
+            "auctions.title) - investigate parser if this number grows",
+            dropped_no_title,
         )
 
     if not valid:
