@@ -202,14 +202,21 @@ def _reset_db() -> None:
         print(f"{deleted:,} rows deleted.")
 
 
-def _export_csv(out_dir: Path) -> None:
+def _export_final(out_dir: Path, fmt: str = "xlsx") -> None:
+    """Run the DB-dump script in the requested output format(s).
+
+    Default is ``xlsx`` (client deliverable). Pass ``"both"`` to also
+    write a CSV alongside, or ``"csv"`` for the legacy behaviour.
+    """
     cmd = [
         sys.executable,
         str(ROOT / "scripts" / "export_db_csv.py"),
         "--out", str(out_dir),
+        "--format", fmt,
     ]
+    label = "xlsx" if fmt == "xlsx" else ("CSV+xlsx" if fmt == "both" else "CSV")
     print(f"\n{'=' * 60}")
-    print("  Exporting final CSVs from DB ...")
+    print(f"  Exporting final {label} from DB ...")
     print(f"{'=' * 60}")
     subprocess.run(cmd, cwd=str(ROOT))
 
@@ -242,7 +249,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--no-export", action="store_true",
-        help="Skip the final DB->CSV export step",
+        help="Skip the final DB->file export step",
+    )
+    parser.add_argument(
+        "--export-format", choices=["csv", "xlsx", "both"], default="xlsx",
+        help=(
+            "Format for the final per-table export from the DB. Default "
+            "``xlsx`` (client deliverable). Pass ``both`` to also produce "
+            "a CSV, or ``csv`` for the legacy CSV-only behaviour."
+        ),
     )
     parser.add_argument(
         "--gooding-pages", type=int, default=None,
@@ -394,7 +409,7 @@ def main() -> None:
 
     # -- 4. Export final CSVs ---------------------------------------------
     if not args.no_export:
-        _export_csv(Path(args.output_dir))
+        _export_final(Path(args.output_dir), fmt=args.export_format)
 
     # -- 5. Summary --------------------------------------------------------
     wall_elapsed = time.time() - wall_start

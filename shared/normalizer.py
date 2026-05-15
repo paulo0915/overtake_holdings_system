@@ -326,11 +326,31 @@ _YEAR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Cars start ~1885 (Benz Patent-Motorwagen). Top end is current year + 1
+# (next-MY pre-orders are common in classifieds, but anything beyond is junk
+# from a parser grabbing a mileage / chassis number).
+_CAR_YEAR_MIN = 1885
+
+
+def _car_year_max() -> int:
+    from datetime import date
+    return date.today().year + 1
+
 
 def parse_year_from_title(title: str) -> int | None:
-    """Extract year from listing title, ignoring mileage patterns."""
+    """Extract year from listing title, ignoring mileage patterns.
+
+    Returns ``None`` for matches outside the valid car-production range
+    (1885..current+1) — this catches AS24-style "WEISSACH KM 1800" cases
+    where a mileage number gets misread as a year.
+    """
     match = _YEAR_RE.search(title)
-    return int(match.group(1)) if match else None
+    if not match:
+        return None
+    year = int(match.group(1))
+    if year < _CAR_YEAR_MIN or year > _car_year_max():
+        return None
+    return year
 
 
 # ---------------------------------------------------------------------------

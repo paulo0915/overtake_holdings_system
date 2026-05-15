@@ -43,12 +43,24 @@ logger = logging.getLogger(__name__)
 
 # Country pools that empirically pass Akamai's IP-reputation check for
 # autotrader.com (2026-04 probe + in-page fetch verification):
-#   jp: ~50% session pass rate
-#   pl: ~20-30% session pass rate (sometimes proxy-level timeouts)
-#   ph: ~30-40% session pass rate
-# us/ar: 0% (burned). We allow-list the good countries and accept the
-# per-session noise by retrying up to N different proxies.
-AKAMAI_FRIENDLY_COUNTRIES = ["jp", "pl", "ph"]
+#   jp:        ~50% session pass rate (proven)
+#   pl/ph:     ~20-40% session pass rate (proven, kept for backward compat)
+#   tw,kr:     predicted ~40-50% (clean Asia residential, low scraper density)
+#   se,no,fi,dk: predicted ~50%+ (Nordic — premium ISPs, small proxy market)
+#   ee,lt,lv:  predicted ~40-50% (Baltic — small market, premium ISPs)
+#   cz,sk,hu,bg,si: predicted ~40-50% (Central Europe — low scraper burn)
+#   at,ch,pt:  predicted ~40-50% (Western EU not in DE/FR/UK/NL burn cluster)
+#   uy,cl,co,cr: predicted ~40-50% (Latam — small clean residential pools)
+# us/ar:       0% (burned). de/fr/uk/nl: ~10-20% (burned proxy markets).
+# Order doesn't matter — proxies are randomly shuffled before warmup.
+AKAMAI_FRIENDLY_COUNTRIES = [
+    "jp", "tw", "kr", "ph", "pl",
+    "se", "no", "fi", "dk",
+    "ee", "lt", "lv",
+    "cz", "sk", "hu", "bg", "si",
+    "at", "ch", "pt",
+    "uy", "cl", "co", "cr",
+]
 
 # How many proxy attempts to make before giving up on a scrape run.
 # Per-session success rate is roughly 1-in-5 (warmup passes but REST probe
@@ -131,13 +143,32 @@ class AutoTraderComScraper(BaseScraper):
                 await session.close()
                 continue
             except Exception as e:
-                # Proxy-level: timeout, auth, DNS, connection refused.
-                logger.warning("Proxy %s proxy-level error: %s", redacted, e)
+                # Discriminate: only mark bad on errors that point at the
+                # PROXY itself. Browser-runtime errors (Playwright not
+                # installed, OOM, etc.) and our own code bugs would otherwise
+                # nuke the proxy pool. Match by error-string substrings since
+                # Playwright's exception types are split across submodules.
+                msg = str(e)
+                local_runtime_markers = (
+                    "Executable doesn't exist",       # browser binary missing
+                    "BrowserType.launch",             # general launch failure
+                    "playwright._impl",               # internal launch errors
+                    "asyncio.exceptions.CancelledError",
+                    "Event loop is closed",
+                )
+                is_local_bug = any(m in msg for m in local_runtime_markers)
+                if is_local_bug:
+                    logger.error(
+                        "Proxy %s LOCAL runtime error (NOT marking proxy bad): %s",
+                        redacted, e,
+                    )
+                else:
+                    logger.warning("Proxy %s proxy-level error: %s", redacted, e)
+                    try:
+                        mark_bad(proxy.url)
+                    except Exception as mark_err:
+                        logger.error("mark_bad DB error: %s", mark_err)
                 await session.close()
-                try:
-                    mark_bad(proxy.url)
-                except Exception as mark_err:
-                    logger.error("mark_bad DB error: %s", mark_err)
                 continue
 
             logger.info("Warmup OK via %s", redacted)

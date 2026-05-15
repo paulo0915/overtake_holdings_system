@@ -198,19 +198,36 @@ def iter_available_proxies(
     yet — the scraper's error message then tells the user what to run.
     """
     client = get_client()
+    # PostgREST caps a single SELECT at 1000 rows by default. With a 5k+
+    # proxy pool we have to page through ``.range()`` to see every
+    # country slice, otherwise scrapers always get the same first-1000
+    # bias and the country_allow filter mismatches what's actually in
+    # the DB.
+    PAGE = 1000
+    rows: list[dict] = []
+    start = 0
     try:
-        result = (
-            client.table("proxies")
-            .select("proxy")
-            .eq("is_bad", False)
-            .execute()
-        )
+        while True:
+            end = start + PAGE - 1
+            batch = (
+                client.table("proxies")
+                .select("proxy")
+                .eq("is_bad", False)
+                .range(start, end)
+                .execute()
+            )
+            page_rows = batch.data or []
+            if not page_rows:
+                break
+            rows.extend(page_rows)
+            if len(page_rows) < PAGE:
+                break
+            start += PAGE
     except Exception as e:
         logger.error(
             "Failed to query 'proxies' table (does it exist?): %s", e,
         )
         return []
-    rows = result.data or []
 
     if country_allow:
         wanted = tuple(f"country-{cc.lower()}" for cc in country_allow)

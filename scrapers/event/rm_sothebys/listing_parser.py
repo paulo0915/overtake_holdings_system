@@ -26,6 +26,17 @@ _AUCTION_LOTS_REL_RE = re.compile(r"/auctions/([a-z0-9]+)/lots/?(?=[\"'?#]|\s|$)
 # Vehicle lots use ``referenceId`` like ``r0048``; ``n1000`` = memorabilia / parts.
 _VEHICLE_REF_RE = re.compile(r"^r\d+", re.I)
 
+# RM occasionally indexes art / display pieces under the ``r`` namespace
+# (e.g. "Physical Sculpture XI by Flatz" — a Porsche-themed sculpture, not
+# a real car). The structural ``r/n`` filter alone misses these; this title
+# regex catches them. Word-boundary anchored so it doesn't false-trip on
+# "Sculptura" or "Sculpt-style" model names.
+_NON_VEHICLE_TITLE_RE = re.compile(
+    r"\b(?:sculpture|painting|artwork|lithograph|poster|memorabilia|"
+    r"diecast|model\s+car|scale\s+model)\b",
+    re.I,
+)
+
 _YEAR_LEADING_RE = re.compile(
     r"^(?:c\.?\s*|circa\s*)?(?P<year>(?:19|20)\d{2})\s+(?P<rest>.+)$",
     re.I,
@@ -160,10 +171,14 @@ def parse_auction_meta_from_lots_page(html: str) -> dict[str, Any]:
 
 
 def is_vehicle_lot(item: dict[str, Any]) -> bool:
-    """True for road-car rows (``referenceId`` ``r…``), excluding parts/memorabilia (``n…``)."""
+    """True for road-car rows (``referenceId`` ``r…``), excluding parts/memorabilia (``n…``)
+    and art / display pieces filed under the vehicle namespace."""
     ref = str(item.get("referenceId") or "").strip()
     link = str(item.get("link") or "")
     if not _VEHICLE_REF_RE.match(ref):
+        return False
+    title = str(item.get("publicName") or item.get("title") or "")
+    if title and _NON_VEHICLE_TITLE_RE.search(title):
         return False
     return f"/lots/{ref.lower()}-" in link.replace("_", "-").lower() or f"/lots/{ref}-" in link
 

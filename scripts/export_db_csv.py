@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared.db import get_client
-from shared.export import export_to_csv
+from shared.export import export_to_csv, export_to_excel
 from shared.schemas import AUCTION_COLUMNS, CLASSIFIEDS_COLUMNS
 
 logger = logging.getLogger(__name__)
@@ -61,10 +61,23 @@ def _lower_to_pascal_map(columns: list[str]) -> dict[str, str]:
 
 def _fetch_all_rows(table: str, order_by: str) -> list[dict]:
     """Page through the table until a short batch signals we've reached
-    the end. Returns the full row list (lowercase keys from the DB).
+    the end. Returns the full row list (lowercase keys from the DB),
+    deduplicated on ``record_id``.
+
+    Why dedup here: ``.range(start, end)`` is offset-based. When many rows
+    share the same ``order_by`` value (e.g. a whole auction's lots get
+    upserted in one ``insert_auction_records`` call and all share the
+    same ``scraped_at``), Postgres' tie-breaker is non-deterministic
+    across requests — so the boundary row of one page can re-appear at
+    the head of the next. We add ``record_id`` as a secondary sort key
+    to make ties deterministic AND drop any straggler dupes in memory
+    as a safety net (some PostgREST versions still drift if the page
+    boundary lands mid-tie-group).
     """
     client = get_client()
     all_rows: list[dict] = []
+    seen_ids: set[str] = set()
+    dropped = 0
     start = 0
     while True:
         end = start + PAGE_SIZE - 1  # .range is inclusive on both ends
@@ -72,20 +85,33 @@ def _fetch_all_rows(table: str, order_by: str) -> list[dict]:
             client.table(table)
             .select("*")
             .order(order_by, desc=True)
+            .order("record_id", desc=True)
             .range(start, end)
             .execute()
         )
         rows = batch.data or []
         if not rows:
             break
-        all_rows.extend(rows)
+        kept = 0
+        for r in rows:
+            rid = r.get("record_id")
+            if rid and rid in seen_ids:
+                dropped += 1
+                continue
+            if rid:
+                seen_ids.add(rid)
+            all_rows.append(r)
+            kept += 1
         logger.info(
-            "%s: fetched %s-%s (%s rows this batch, %s total)",
-            table, start, start + len(rows) - 1, len(rows), len(all_rows),
+            "%s: fetched %s-%s (%s rows this batch, %s kept, %s total)",
+            table, start, start + len(rows) - 1, len(rows), kept, len(all_rows),
         )
         if len(rows) < PAGE_SIZE:
             break
         start += PAGE_SIZE
+    if dropped:
+        logger.info("%s: dropped %s duplicate row(s) across page boundaries",
+                    table, dropped)
     return all_rows
 
 
@@ -104,8 +130,13 @@ def _remap_keys(rows: list[dict], columns: list[str]) -> list[dict]:
     return remapped
 
 
-def export_one(table: str, out_path: Path) -> Path:
-    """Fetch + remap + write a single table. Returns the resolved path."""
+def export_one(table: str, out_path: Path, *, formats: list[str]) -> list[Path]:
+    """Fetch + remap + write a single table in each requested format.
+
+    ``formats`` is a list of ``"csv"`` and/or ``"xlsx"``. The base path
+    (``out_path``) is treated as the stem; the correct extension is added
+    per format. Returns the list of paths written.
+    """
     cfg = _TABLES[table]
     logger.info("Fetching %s table ...", table)
     rows = _fetch_all_rows(table, cfg["order_by"])
@@ -113,13 +144,21 @@ def export_one(table: str, out_path: Path) -> Path:
 
     if not rows:
         logger.warning(
-            "%s: no rows — writing empty CSV with headers only", table,
+            "%s: no rows — writing empty file(s) with headers only", table,
         )
 
     records = _remap_keys(rows, cfg["columns"])
-    path = export_to_csv(records, out_path, cfg["columns"])
-    logger.info("%s: wrote %s rows to %s", table, len(records), path.resolve())
-    return path
+    base = out_path.with_suffix("")  # strip whichever ext was passed in
+    written: list[Path] = []
+    if "csv" in formats:
+        p = export_to_csv(records, base.with_suffix(".csv"), cfg["columns"])
+        logger.info("%s: wrote %s rows to %s", table, len(records), p.resolve())
+        written.append(p)
+    if "xlsx" in formats:
+        p = export_to_excel(records, base.with_suffix(".xlsx"), cfg["columns"])
+        logger.info("%s: wrote %s rows to %s", table, len(records), p.resolve())
+        written.append(p)
+    return written
 
 
 def main() -> None:
@@ -132,8 +171,16 @@ def main() -> None:
         "--out", type=str, default="output",
         help=(
             "Output directory (default: output/). Filenames are "
-            "``<table>_<YYYY-MM-DD>.csv``. For a single table you can "
-            "also pass a specific file path."
+            "``<table>_<YYYY-MM-DD>.<ext>``. For a single table + single "
+            "format you can also pass a specific file path."
+        ),
+    )
+    parser.add_argument(
+        "--format", choices=["csv", "xlsx", "both"], default="xlsx",
+        help=(
+            "Output format(s). Default xlsx (client deliverable). Pass "
+            "``both`` to also write a CSV alongside the xlsx, or ``csv`` "
+            "for the legacy CSV-only behaviour."
         ),
     )
     args = parser.parse_args()
@@ -144,20 +191,30 @@ def main() -> None:
     )
 
     tables = list(_TABLES) if args.table == "both" else [args.table]
+    formats = ["csv", "xlsx"] if args.format == "both" else [args.format]
     out = Path(args.out)
     from datetime import timezone as _tz
     stamp = datetime.now(_tz.utc).strftime("%Y-%m-%d")
 
-    # If ``--out`` points at a .csv file AND a single table was chosen,
-    # honour that exact path. Otherwise treat it as a directory and
-    # auto-name each table's file.
-    is_explicit_file = out.suffix.lower() == ".csv" and len(tables) == 1
+    # If ``--out`` points at a real file AND a single table + single format
+    # was chosen, honour that exact path. Otherwise treat it as a directory
+    # and auto-name each table's file with the correct extension.
+    is_explicit_file = (
+        out.suffix.lower() in (".csv", ".xlsx")
+        and len(tables) == 1
+        and len(formats) == 1
+    )
     if not is_explicit_file:
         out.mkdir(parents=True, exist_ok=True)
 
     for table in tables:
-        target = out if is_explicit_file else out / f"{table}_{stamp}.csv"
-        export_one(table, target)
+        if is_explicit_file:
+            target = out
+        else:
+            # Use the first format's extension as the placeholder; export_one
+            # swaps suffix per requested format anyway.
+            target = out / f"{table}_{stamp}.{formats[0]}"
+        export_one(table, target, formats=formats)
 
 
 if __name__ == "__main__":

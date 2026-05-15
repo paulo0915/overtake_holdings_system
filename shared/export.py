@@ -1,9 +1,26 @@
 """Export scraped data to CSV and Excel."""
 
 import logging
+import re
 from pathlib import Path
 
 import pandas as pd
+
+# OOXML (Excel's xlsx format) forbids most ASCII control characters in cell
+# values; openpyxl raises ``IllegalCharacterError`` on the first offending
+# cell and aborts the whole sheet. Scraped editorial copy occasionally carries
+# stray ``\x00`` (from decoded HTML entities), ``\x07`` BEL, ``\x0b`` VT,
+# ``\x0c`` FF, etc., from sloppy CMS exports — invisible in browsers but
+# fatal to xlsx. Allowed exceptions: ``\t`` (\x09), ``\n`` (\x0a), ``\r``
+# (\x0d). This regex matches everything else in the C0 + C1 control ranges.
+_XLSX_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _strip_xlsx_illegal(value):
+    """Remove ASCII control chars Excel rejects. No-op on non-strings."""
+    if isinstance(value, str):
+        return _XLSX_ILLEGAL_CHARS_RE.sub("", value)
+    return value
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +56,10 @@ def export_to_csv(records: list[dict], output_path: str | Path, columns: list[st
 def export_to_excel(records: list[dict], output_path: str | Path, columns: list[str]) -> Path:
     """Export records to Excel with Data Dictionary sheet."""
     df = _build_dataframe(records, columns)
+    # Sanitize control chars before openpyxl gets a chance to reject the whole
+    # sheet. ``DataFrame.map`` element-wise transforms only object-dtype cells
+    # (Int64/float columns are skipped naturally — the helper no-ops on them).
+    df = df.map(_strip_xlsx_illegal)
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -92,6 +113,19 @@ def enrich_records(records: list[dict]) -> list[dict]:
         )
         r["Make"] = make
         r["Model"] = model
+
+        # Year: drop impossible values up front. Some scrapers grab odometer
+        # tokens or chassis-number digits as year (e.g. "WEISSACH KM 1800").
+        # Cars are 1885..current+1 — anything outside is parser noise.
+        from datetime import date as _date
+        existing_year = r.get("Year")
+        if existing_year is not None:
+            try:
+                yi = int(existing_year)
+                if yi < 1885 or yi > _date.today().year + 1:
+                    r["Year"] = None
+            except (TypeError, ValueError):
+                r["Year"] = None
 
         # Year: if the stored Year disagrees with the 4-digit year at the start
         # of the Title, the Title is treated as authoritative (brief §5 / client

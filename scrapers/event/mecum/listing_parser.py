@@ -629,6 +629,56 @@ def _html_mileage_fallback(soup: BeautifulSoup) -> int | None:
 _DESC_SKIP_HEADINGS = {"SPECIFICATIONS", "PHOTOS", "VIDEOS", "DOCUMENTATION"}
 
 
+def _specs_from_article(soup: BeautifulSoup) -> dict[str, Any]:
+    """Extract structured spec values from the SPECIFICATIONS section.
+
+    The new Mecum DOM renders specs as ``wp-block-column`` divs whose
+    direct text is ``"<LABEL> <VALUE>"`` and whose ``<strong>`` child
+    holds just ``<VALUE>``. We get LABEL by stripping the strong text
+    from the full text.
+
+    Mecum's GraphQL ``post`` no longer reliably populates engine_spec
+    (the ``engineNumber`` field stores serials, not displacement strings),
+    and the description-scan fallback only catches ~8% of lots. The
+    SPECIFICATIONS panel has the canonical values for ~all sold lots.
+    """
+    out: dict[str, Any] = {}
+    article = soup.find("article")
+    if not article:
+        return out
+    spec_section = None
+    for sec in article.select("[class*=lotSection]"):
+        head = sec.get_text(" ", strip=True).split(" ", 1)[0].upper()
+        if head == "SPECIFICATIONS":
+            spec_section = sec
+            break
+    if spec_section is None:
+        return out
+
+    # ``LABEL_TO_FIELD`` maps the human-visible heading to our normalized
+    # internal key. Add new entries here if Mecum surfaces more spec rows.
+    LABEL_TO_FIELD = {
+        "ENGINE": "engine_spec",
+        "TRANSMISSION": "transmission",
+        "EXTERIOR COLOR": "ext_color",
+        "INTERIOR COLOR": "int_color",
+    }
+    for col in spec_section.select(".wp-block-column, [class*=column]"):
+        strong = col.find("strong")
+        if not strong:
+            continue
+        value = strong.get_text(" ", strip=True)
+        if not value:
+            continue
+        full = col.get_text(" ", strip=True)
+        # Label = full text minus the strong-value at the end.
+        label = full[: -len(value)].strip().upper().rstrip(":")
+        field = LABEL_TO_FIELD.get(label)
+        if field and field not in out:
+            out[field] = value
+    return out
+
+
 def _description_from_article(soup: BeautifulSoup) -> str | None:
     """Mecum's App Router rebuild dropped __NEXT_DATA__. The editorial body
     is now rendered as discrete sections inside ``<article>``: HIGHLIGHTS,
@@ -692,6 +742,20 @@ def parse_lot_html(html: str | None) -> dict[str, Any] | None:
         desc = _description_from_article(soup)
         if desc:
             result["listing_description"] = desc
+
+    # SPECIFICATIONS section gives us engine_spec / transmission / colors
+    # the GraphQL ``post`` doesn't reliably carry. Only fill blanks — never
+    # overwrite a value the API already provided.
+    specs = _specs_from_article(soup)
+    if specs:
+        for k, v in specs.items():
+            if v and not result.get(k):
+                if k == "engine_spec":
+                    result[k] = normalize_engine_spec(v) or v
+                elif k == "transmission":
+                    result[k] = normalize_transmission(v) or v
+                else:
+                    result[k] = v
 
     return result if result else None
 
