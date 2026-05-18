@@ -85,9 +85,36 @@ class AutoTraderSession:
         self._browser: Any = None
         self._ctx: Any = None
         self._page: Any = None
+        # Dedicated single-worker executor. Playwright's sync_api binds
+        # the instance to the thread that called ``sync_playwright().start()``;
+        # every subsequent call (``page.goto``, ``page.evaluate``, etc.)
+        # MUST come from that same thread or Playwright raises
+        # ``Cannot switch to a different thread``. The default
+        # ``asyncio.to_thread`` uses a multi-worker pool, so two list-page
+        # fetches issued back-to-back could land on different workers and
+        # crash. ``max_workers=1`` makes the whole session pin to one OS
+        # thread for its lifetime.
+        from concurrent.futures import ThreadPoolExecutor
+        self._executor: ThreadPoolExecutor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"atcom-pw-{id(self) & 0xFFFF:x}",
+        )
+
+    async def _run_sync(self, fn, /, *args, **kwargs):
+        """Schedule ``fn(*args, **kwargs)`` on this session's dedicated
+        Playwright thread and await the result. Replaces ``asyncio.to_thread``
+        which uses a multi-worker pool and breaks Playwright's thread binding.
+        """
+        import asyncio as _aio
+        loop = _aio.get_running_loop()
+        if kwargs:
+            from functools import partial
+            return await loop.run_in_executor(self._executor, partial(fn, *args, **kwargs))
+        return await loop.run_in_executor(self._executor, fn, *args)
 
     # --- Sync Playwright lifecycle must run off the asyncio loop. ----
-    # Each public async method schedules the sync work in a thread.
+    # Each public async method schedules the sync work on the session's
+    # dedicated thread (see ``_run_sync``).
 
     async def warmup(self) -> None:
         """Launch Firefox, load homepage, harvest Akamai cookies.
@@ -95,7 +122,7 @@ class AutoTraderSession:
         Raises ``AkamaiChallengeError`` if Akamai serves the
         interstitial (proxy IP burned) or if critical cookies never set.
         """
-        await asyncio.to_thread(self._sync_warmup)
+        await self._run_sync(self._sync_warmup)
 
     def _sync_warmup(self) -> None:
         from playwright.sync_api import sync_playwright
@@ -202,24 +229,43 @@ class AutoTraderSession:
         return self._sync_fetch(url)
 
     async def fetch_list_page(
-        self, *, mode: str, first_record: int,
+        self,
+        *,
+        mode: str,
+        first_record: int,
+        zip_code: str | None = None,
+        city: str | None = None,
+        state: str | None = None,
+        radius: int | None = None,
+        make_code: str | None = None,
     ) -> dict[str, Any]:
         """Call ``/rest/lsc/listing`` via in-page fetch. Returns the
         parsed JSON body. Raises ``AkamaiChallengeError`` if Akamai
         returns the challenge stub mid-run.
+
+        ``zip_code``/``city``/``state``/``radius`` allow geo-sharded
+        searches. ``make_code`` (e.g. ``"FERR"``, ``"LAM"``) restricts
+        the query to one manufacturer — used by the make-shard phase
+        to surface dealer inventory the geo phase misses. When omitted
+        these fall back to ``DEFAULT_*`` (Ashburn VA with national mode
+        and no make filter) so single-zip behavior is unchanged.
         """
         params: dict[str, str] = {
             "newSearch": "true",
-            "searchRadius": "0",
+            # radius=None means use the default behaviour (0 = national);
+            # any positive integer caps to that mile radius around ``zip``.
+            "searchRadius": str(radius) if radius is not None else "0",
             "sortBy": "derivedpriceDESC",
-            "zip": DEFAULT_ZIPCODE,
-            "city": DEFAULT_CITY,
-            "state": DEFAULT_STATE,
+            "zip": zip_code or DEFAULT_ZIPCODE,
+            "city": city or DEFAULT_CITY,
+            "state": state or DEFAULT_STATE,
             "channel": "ATC",
             "relevanceConfig": "relevance-v2",
             "firstRecord": str(first_record),
             "numRecords": str(DEFAULT_PAGE_SIZE),
         }
+        if make_code:
+            params["makeCodeList"] = make_code
         lt = listing_type_for_mode(mode)
         if lt:
             params["listingTypes"] = lt
@@ -229,7 +275,7 @@ class AutoTraderSession:
         from urllib.parse import urlencode
         url = f"{SITE_ORIGIN}{LIST_REST_PATH}?{urlencode(params)}"
 
-        body = await asyncio.to_thread(self._sync_fetch, url)
+        body = await self._run_sync(self._sync_fetch, url)
         if _is_akamai_stub(body):
             raise AkamaiChallengeError(
                 f"Akamai served challenge stub on list call (size={len(body)})."
@@ -245,7 +291,7 @@ class AutoTraderSession:
         """Fetch a VDP via in-page ``fetch()``. Returns HTML or None on
         404 / challenge stub (caller decides whether to retry).
         """
-        body = await asyncio.to_thread(self._sync_fetch, url)
+        body = await self._run_sync(self._sync_fetch, url)
         if not body or _is_akamai_stub(body):
             return None
         return body
@@ -262,7 +308,7 @@ class AutoTraderSession:
         Use as a fallback when the raw HTML fetch returned a short /
         empty description.
         """
-        return await asyncio.to_thread(self._sync_render, url)
+        return await self._run_sync(self._sync_render, url)
 
     def _sync_render(self, url: str) -> str | None:
         try:
@@ -304,7 +350,13 @@ class AutoTraderSession:
             return ""
 
     async def close(self) -> None:
-        await asyncio.to_thread(self._sync_close)
+        try:
+            await self._run_sync(self._sync_close)
+        finally:
+            # Shut down the dedicated executor so the thread doesn't linger
+            # after the session is discarded — critical when we rotate
+            # sessions mid-run (otherwise every rotation leaks a thread).
+            self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _sync_close(self) -> None:
         try:

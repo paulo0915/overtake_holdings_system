@@ -35,7 +35,16 @@ from shared.vehicle_filter import VehicleFilter
 
 from . import record_builder
 from .api_client import AkamaiChallengeError, AutoTraderSession
-from .config import DEFAULT_PAGE_SIZE, HARD_RESULT_CAP, MODE_ALL, MODE_NEW, MODE_USED
+from .config import (
+    DEFAULT_PAGE_SIZE,
+    DEFAULT_SHARD_RADIUS_MI,
+    HARD_RESULT_CAP,
+    LUXURY_MAKE_CODES,
+    MODE_ALL,
+    MODE_NEW,
+    MODE_USED,
+    ZIP_SHARDS,
+)
 from .listing_parser import parse_detail_html, parse_list_row
 
 logger = logging.getLogger(__name__)
@@ -194,16 +203,31 @@ class AutoTraderComScraper(BaseScraper):
         logger.info("=" * 60)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        session = await self._open_working_session()
-        if session is None:
+        # Resilient list scrape — opens its own session(s) and rotates
+        # when one dies mid-run. Returns the (session, flat_rows) tuple
+        # so the detail phase can continue with the same live session
+        # rather than discarding it.
+        session, flat_rows = await self._scrape_list_resilient()
+        if not flat_rows:
+            if session is not None:
+                await session.close()
             return []
 
+        logger.info("Collected %s listings - fetching details", len(flat_rows))
+        # Detail fetches are the long pole (~10s per VDP, sequential per
+        # session). With ``max_concurrent`` workers we open N independent
+        # sessions in parallel — each gets its own proxy/browser and
+        # scrapes a stride of the listings list. The first session
+        # (already warmed during list scrape) handles chunk 0; the rest
+        # warm fresh sessions in parallel. Default ``max_concurrent=4``
+        # gives ~3-4x speedup without thrashing the proxy pool.
         try:
-            flat_rows = await self._scrape_list(session)
-            logger.info("Collected %s listings - fetching details", len(flat_rows))
-            details = await self._scrape_details(session, flat_rows)
+            details = await self._scrape_details_parallel(
+                session, flat_rows, workers=max(1, self.max_concurrent),
+            )
         finally:
-            await session.close()
+            if session is not None:
+                await session.close()
 
         # --- Build records -----------------------------------------------
         scraped_at = get_scraped_at()
@@ -242,116 +266,407 @@ class AutoTraderComScraper(BaseScraper):
 
     # --- Internal steps -----------------------------------------------
 
-    async def _scrape_list(self, session: AutoTraderSession) -> list[dict]:
-        """Paginate ``/rest/lsc/listing`` via the browser until we run
-        out, hit min-price, or exceed ``--max-pages``.
+    # Cap on how many fresh sessions we'll spin up across a single
+    # scraper invocation. Each rotation costs ~30-60s of warmup; if we
+    # need more than 20 the proxy pool is genuinely dead and we should
+    # surface that rather than loop forever.
+    _MAX_SESSION_ROTATIONS = 20
+
+    async def _scrape_list_resilient(self) -> tuple[AutoTraderSession | None, list[dict]]:
+        """Two-phase sharded list scrape with mid-run proxy rotation.
+
+        AutoTrader's ``sortBy=derivedpriceDESC`` caps deep pagination at
+        ~300-500 records per query, even in "national" mode (``searchRadius=0``).
+        Each unique query signature (zip+radius+make combo) gets its own
+        depth allowance, so we run two phases sequentially:
+
+        **Phase 1 — Geo sharding** (~170 zip seeds at 100mi radius).
+        Covers every US state. Surfaces dealer inventory by region.
+
+        **Phase 2 — Make sharding** (~25 luxury makes, national radius).
+        Each per-make query gets a fresh 500-cap depth. Catches dealers
+        whose location no geo shard reached and high-volume make-specific
+        inventory (Ferrari/Porsche specialists, etc.).
+
+        Both phases share ``seen_urls`` so cross-phase dedup is automatic.
+        Session resilience is per-shard: a session that fails triggers a
+        rotation (re-warm with a fresh proxy) and the shard resumes from
+        the same offset. Sessions persist across shards when healthy —
+        we don't burn a warmup per shard.
+
+        Returns ``(live_session, flat_rows)``. The session is kept alive
+        for the subsequent detail-fetch phase so we don't burn a fresh
+        warmup just to start the second stage.
         """
         flat_rows: list[dict] = []
-        first_record = 0
-        page = 0
-        total_reported: int | None = None
-        while True:
-            page += 1
-            try:
-                payload = await session.fetch_list_page(
-                    mode=self.mode, first_record=first_record,
-                )
-            except AkamaiChallengeError as e:
-                # Mid-run challenge — cookies went stale. Bail on the
-                # rest of this run rather than silently producing partial
-                # data. Next invocation will re-warm and resume.
-                logger.error("List page %s Akamai-challenged: %s", page, e)
-                break
-            except Exception as e:
-                logger.error("List page %s failed: %s", page, e)
-                break
+        seen_urls: set[str] = set()
+        session: AutoTraderSession | None = None
+        rotations = 0
+        total_reported_logged = False
 
-            listings = payload.get("listings") or []
-            if total_reported is None:
-                total_reported = (
-                    payload.get("totalResultCount")
-                    or payload.get("totalCount")
-                    or payload.get("resultCount")
-                )
-                logger.info(
-                    "AutoTrader.com reports %s total listings (site cap = %s)",
-                    total_reported, HARD_RESULT_CAP,
-                )
+        # Build the combined shard plan: ~170 geo + ~25 make = ~195 queries.
+        # Each shard descriptor is (label, query-kwargs-for-fetch_list_page).
+        geo_shards = [
+            (
+                f"{city},{state} ({zip_code})",
+                {
+                    "zip_code": zip_code, "city": city, "state": state,
+                    "radius": DEFAULT_SHARD_RADIUS_MI, "make_code": None,
+                },
+            )
+            for zip_code, city, state in ZIP_SHARDS
+        ]
+        make_shards = [
+            (
+                f"{name} (national)",
+                {
+                    "zip_code": None, "city": None, "state": None,
+                    "radius": 0, "make_code": code,
+                },
+            )
+            for name, code in LUXURY_MAKE_CODES
+        ]
+        all_shards = geo_shards + make_shards
 
-            if not listings:
-                break
-
-            page_added = 0
-            stop_low_price = False
-            for row in listings:
-                flat = parse_list_row(row)
-                if not flat:
-                    continue
-                price = flat.get("asking_price")
-                if price is not None and price < self.min_price:
-                    stop_low_price = True
-                    break
-                if self.vehicle_filter and flat.get("title"):
-                    if not self.vehicle_filter.match(flat["title"], ""):
-                        continue
-                flat_rows.append(flat)
-                page_added += 1
-
+        for shard_idx, (shard_label, query_kwargs) in enumerate(all_shards, start=1):
+            phase_tag = "geo" if shard_idx <= len(geo_shards) else "make"
             logger.info(
-                "Page %s (offset %s): %s listings -> %s kept (total %s)",
-                page, first_record, len(listings), page_added, len(flat_rows),
+                "=== Shard %s/%s [%s]: %s ===",
+                shard_idx, len(all_shards), phase_tag, shard_label,
             )
 
-            if stop_low_price:
-                logger.info("Hit min-price floor ($%s) - stopping", f"{self.min_price:,}")
-                break
-            if self.max_pages > 0 and page >= self.max_pages:
-                logger.info("Max pages (%s) reached - stopping", self.max_pages)
-                break
-            if first_record + DEFAULT_PAGE_SIZE >= HARD_RESULT_CAP:
-                logger.info("Reached 10k result cap - stopping")
-                break
+            first_record = 0
+            page = 0
+            consecutive_failures = 0
+            shard_added = 0
+            shard_consecutive_all_dupes = 0
+            # Per-shard caps. AutoTrader stops serving past ~500 even
+            # within a metro; capping at 600 gives slack for the case
+            # where a few duplicate pages get retried via rotation.
+            SHARD_MAX_OFFSET = 600
 
-            first_record += DEFAULT_PAGE_SIZE
-            await asyncio.sleep(REQUEST_DELAY_SECONDS * 0.5 + random.uniform(0.2, 0.6))
+            while True:
+                if rotations >= self._MAX_SESSION_ROTATIONS:
+                    logger.error(
+                        "Exhausted %s session rotations; stopping all shards "
+                        "with %s rows collected so far.",
+                        self._MAX_SESSION_ROTATIONS, len(flat_rows),
+                    )
+                    return session, flat_rows
 
-        return flat_rows
+                if session is None:
+                    session = await self._open_working_session()
+                    if session is None:
+                        logger.error(
+                            "No working session available; stopping list scrape "
+                            "at shard %s/%s, %s rows collected.",
+                            shard_idx, len(ZIP_SHARDS), len(flat_rows),
+                        )
+                        return session, flat_rows
+                    rotations += 1
+                    logger.info(
+                        "Active session #%s — shard %s resuming from offset %s",
+                        rotations, shard_label, first_record,
+                    )
 
-    async def _scrape_details(
-        self, session: AutoTraderSession, flat_rows: list[dict],
+                page += 1
+                try:
+                    payload = await session.fetch_list_page(
+                        mode=self.mode,
+                        first_record=first_record,
+                        **query_kwargs,
+                    )
+                except AkamaiChallengeError as e:
+                    logger.warning(
+                        "Shard %s page %s (offset %s) Akamai-challenged: %s - "
+                        "rotating session", shard_label, page, first_record, e,
+                    )
+                    await session.close()
+                    session = None
+                    page -= 1
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:
+                        logger.error(
+                            "3 consecutive challenges on shard %s offset %s; "
+                            "moving to next shard",
+                            shard_label, first_record,
+                        )
+                        break
+                    continue
+                except Exception as e:
+                    logger.warning(
+                        "Shard %s page %s (offset %s) failed: %s - rotating",
+                        shard_label, page, first_record, e,
+                    )
+                    await session.close()
+                    session = None
+                    page -= 1
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:
+                        logger.error(
+                            "3 consecutive failures on shard %s offset %s; "
+                            "moving to next shard",
+                            shard_label, first_record,
+                        )
+                        break
+                    continue
+
+                consecutive_failures = 0  # successful fetch
+
+                listings = payload.get("listings") or []
+                if not total_reported_logged:
+                    total_reported = (
+                        payload.get("totalResultCount")
+                        or payload.get("totalCount")
+                        or payload.get("resultCount")
+                    )
+                    logger.info(
+                        "AutoTrader.com reports %s total listings for first "
+                        "shard query (site cap = %s)",
+                        total_reported, HARD_RESULT_CAP,
+                    )
+                    total_reported_logged = True
+
+                if not listings:
+                    logger.info(
+                        "Shard %s exhausted (empty page at offset %s)",
+                        shard_label, first_record,
+                    )
+                    break
+
+                page_added = 0
+                page_dupes = 0
+                stop_low_price = False
+                for row in listings:
+                    flat = parse_list_row(row)
+                    if not flat:
+                        continue
+                    price = flat.get("asking_price")
+                    if price is not None and price < self.min_price:
+                        stop_low_price = True
+                        break
+                    if self.vehicle_filter and flat.get("title"):
+                        if not self.vehicle_filter.match(flat["title"], ""):
+                            continue
+                    url = flat.get("listing_url")
+                    if url and url in seen_urls:
+                        page_dupes += 1
+                        continue
+                    if url:
+                        seen_urls.add(url)
+                    flat_rows.append(flat)
+                    page_added += 1
+                    shard_added += 1
+
+                logger.info(
+                    "Shard %s page %s (offset %s): %s listings -> %s new, %s dupes "
+                    "(shard %s, grand total %s)",
+                    shard_label, page, first_record, len(listings),
+                    page_added, page_dupes, shard_added, len(flat_rows),
+                )
+
+                # Stop conditions for THIS shard (not the whole scrape):
+                if stop_low_price:
+                    logger.info(
+                        "Shard %s hit min-price floor ($%s) - moving to next shard",
+                        shard_label, f"{self.min_price:,}",
+                    )
+                    break
+                # If a whole page returned no new URLs, we're scraping pure
+                # overlap. After 2 such consecutive pages this shard is mined out.
+                if page_added == 0 and len(listings) > 0:
+                    shard_consecutive_all_dupes += 1
+                    if shard_consecutive_all_dupes >= 2:
+                        logger.info(
+                            "Shard %s page %s was 100%% dupes (2 in a row) — "
+                            "moving to next shard",
+                            shard_label, page,
+                        )
+                        break
+                else:
+                    shard_consecutive_all_dupes = 0
+
+                if self.max_pages > 0 and page >= self.max_pages:
+                    logger.info(
+                        "Shard %s hit --max-pages cap (%s) - moving to next shard",
+                        shard_label, self.max_pages,
+                    )
+                    break
+                if first_record + DEFAULT_PAGE_SIZE >= SHARD_MAX_OFFSET:
+                    logger.info(
+                        "Shard %s hit per-shard offset cap (%s) - moving to next "
+                        "shard", shard_label, SHARD_MAX_OFFSET,
+                    )
+                    break
+
+                first_record += DEFAULT_PAGE_SIZE
+                await asyncio.sleep(REQUEST_DELAY_SECONDS * 0.5 + random.uniform(0.2, 0.6))
+
+        return session, flat_rows
+
+    async def _scrape_details_parallel(
+        self,
+        seed_session: AutoTraderSession | None,
+        flat_rows: list[dict],
+        *,
+        workers: int,
     ) -> dict[str, dict]:
-        """Fetch VDP HTML for each listing and extract dealer description.
+        """Fan the detail scrape across ``workers`` parallel sessions.
 
-        Sequential (concurrency=1) — all requests share the same browser
-        page, so we can't parallelise without additional context tabs.
-        Akamai is also more tolerant of paced sequential traffic than
-        concurrent bursts.
+        Strategy:
+          * Slice ``flat_rows`` round-robin across ``workers`` chunks so
+            every worker covers a mix of price tiers (avoids one worker
+            getting stuck on a slow cluster).
+          * Worker 0 reuses the already-warmed ``seed_session`` so we
+            don't waste the ~2 min warmup that just succeeded.
+          * Workers 1..N-1 each open a fresh session (own proxy + browser).
+          * Each worker runs the existing ``_scrape_details_resilient``
+            loop, which rotates its own session on Akamai failures.
+          * Results merge into one dict.
+
+        Trade-off: ``workers`` browsers = ``workers`` × ~500MB RAM and
+        proportionally more proxy attempts. Default 4 is a good balance
+        for typical hardware and Akamai tolerance.
+        """
+        if not flat_rows:
+            return {}
+        workers = max(1, min(workers, len(flat_rows)))
+
+        chunks: list[list[dict]] = [[] for _ in range(workers)]
+        for i, row in enumerate(flat_rows):
+            chunks[i % workers].append(row)
+
+        logger.info(
+            "Detail scrape: %s workers, chunk sizes=%s",
+            workers, [len(c) for c in chunks],
+        )
+
+        async def _worker(idx: int, chunk: list[dict]) -> dict[str, dict]:
+            # Worker 0 reuses the seed session; others open their own.
+            sess = seed_session if idx == 0 else None
+            logger.info(
+                "Detail worker %s starting (%s rows, %s session)",
+                idx, len(chunk), "reused" if sess else "fresh",
+            )
+            result = await self._scrape_details_resilient(sess, chunk)
+            logger.info(
+                "Detail worker %s done (%s/%s rows)", idx, len(result), len(chunk),
+            )
+            return result
+
+        results = await asyncio.gather(
+            *(_worker(i, c) for i, c in enumerate(chunks)),
+            return_exceptions=True,
+        )
+        merged: dict[str, dict] = {}
+        for i, r in enumerate(results):
+            if isinstance(r, BaseException):
+                logger.error("Detail worker %s crashed: %s", i, r)
+                continue
+            merged.update(r)
+        return merged
+
+    async def _scrape_details_resilient(
+        self,
+        session: AutoTraderSession | None,
+        flat_rows: list[dict],
+    ) -> dict[str, dict]:
+        """VDP fetcher with mid-run proxy rotation.
+
+        Same resilience pattern as ``_scrape_list_resilient``: when the
+        session dies (Akamai challenge, network error, broken page state),
+        we close it, open a fresh one, and continue from the next index.
+        Per-row failures are tolerated (left in the dict as ``{}``) and
+        skipped after one retry — losing a few VDP descriptions out of
+        thousands is better than aborting the whole detail phase.
         """
         details: dict[str, dict] = {}
         total = len(flat_rows)
-        for i, flat in enumerate(flat_rows, 1):
-            key = flat["record_id"]
-            parsed: dict = {}
-            try:
-                raw = await session.fetch_detail_html(url=flat["listing_url"])
-                parsed = parse_detail_html(raw) if raw else {}
-                # If fast path didn't produce a real description, render
-                # the VDP so client-side-hydrated fields (some dealers
-                # push notes via XHR after mount) come into scope.
-                if not (parsed.get("description") or "").strip():
-                    rendered = await session.fetch_detail_rendered(
-                        url=flat["listing_url"],
+        rotations = 0
+        i = 0
+        # Track whether the CURRENTLY-held session was opened by us (in
+        # which case we own its lifecycle and must close it on exit) or
+        # was handed in by the caller (caller still owns it). Only the
+        # seed session — the one originally passed in — belongs to the
+        # caller; every rotation thereafter creates a session we own.
+        owns_session = False
+        try:
+            while i < total:
+                if session is None:
+                    if rotations >= self._MAX_SESSION_ROTATIONS:
+                        logger.error(
+                            "Exhausted %s session rotations during detail scrape; "
+                            "stopping at %s/%s.",
+                            self._MAX_SESSION_ROTATIONS, i, total,
+                        )
+                        break
+                    session = await self._open_working_session()
+                    if session is None:
+                        logger.error(
+                            "No working session available; stopping detail scrape "
+                            "at %s/%s.", i, total,
+                        )
+                        break
+                    owns_session = True
+                    rotations += 1
+                    logger.info(
+                        "Active detail session #%s — resuming at index %s",
+                        rotations, i,
                     )
-                    if rendered:
-                        re_parsed = parse_detail_html(rendered)
-                        if (re_parsed.get("description") or "").strip():
-                            parsed = re_parsed
-            except AkamaiChallengeError:
-                logger.warning("detail %s Akamai-challenged, skipping", key)
-            except Exception as e:
-                logger.debug("detail %s failed: %s", key, e)
-            details[key] = parsed
-            if i % 25 == 0 or i == total:
-                logger.info("Detail fetch %s/%s", i, total)
-            await asyncio.sleep(REQUEST_DELAY_SECONDS * 0.6 + random.uniform(0.3, 0.7))
+
+                flat = flat_rows[i]
+                key = flat["record_id"]
+                parsed: dict = {}
+                try:
+                    raw = await session.fetch_detail_html(url=flat["listing_url"])
+                    parsed = parse_detail_html(raw) if raw else {}
+                    if not (parsed.get("description") or "").strip():
+                        rendered = await session.fetch_detail_rendered(
+                            url=flat["listing_url"],
+                        )
+                        if rendered:
+                            re_parsed = parse_detail_html(rendered)
+                            if (re_parsed.get("description") or "").strip():
+                                parsed = re_parsed
+                except AkamaiChallengeError as e:
+                    logger.warning(
+                        "Detail %s Akamai-challenged: %s - rotating session",
+                        key, e,
+                    )
+                    await session.close()
+                    session = None
+                    owns_session = False
+                    continue  # retry same index with new session
+                except Exception as e:
+                    msg = str(e)
+                    # Per-row transient errors stay per-row; session-level errors
+                    # (NetworkError, thread-binding, page closed) rotate the
+                    # session before continuing. Heuristic on message string.
+                    session_level = any(m in msg for m in (
+                        "NetworkError", "Cannot switch", "Target closed",
+                        "Browser closed", "Connection closed",
+                    ))
+                    if session_level:
+                        logger.warning(
+                            "Detail %s session-level error: %s - rotating session",
+                            key, e,
+                        )
+                        await session.close()
+                        session = None
+                        owns_session = False
+                        continue  # retry same index
+                    logger.debug("detail %s failed: %s", key, e)
+
+                details[key] = parsed
+                i += 1
+                if i % 25 == 0 or i == total:
+                    logger.info("Detail fetch %s/%s", i, total)
+                await asyncio.sleep(REQUEST_DELAY_SECONDS * 0.6 + random.uniform(0.3, 0.7))
+        finally:
+            # Close any session WE created (don't touch the seed — caller owns it).
+            if owns_session and session is not None:
+                try:
+                    await session.close()
+                except Exception as e:
+                    logger.debug("Closing worker-owned session failed: %s", e)
         return details

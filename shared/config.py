@@ -15,6 +15,15 @@ load_dotenv(_env_path)
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
+# === iProyal rotating residential proxies ===
+# Credentials live in .env. The shared/proxies module synthesizes a fresh
+# (port, country) combination per request — no DB row needed. Each request
+# gets a different residential IP from iProyal's pool, so the legacy
+# "mark proxy bad" pattern is unnecessary (and a no-op).
+IPROYAL_HOST = os.getenv("IPROYAL_HOST", "geo.iproyal.com")
+IPROYAL_USERNAME = os.getenv("IPROYAL_USERNAME", "").strip()
+IPROYAL_PASSWORD = os.getenv("IPROYAL_PASSWORD", "").strip()
+
 # === Price thresholds ===
 MIN_PRICE_USD = int(os.getenv("MIN_PRICE_USD", "500000"))
 # Upper sanity cap — any asking/selling price above this is almost certainly a

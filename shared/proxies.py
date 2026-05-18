@@ -1,20 +1,25 @@
-"""Residential-proxy rotation against the Supabase ``proxies`` table.
+"""Residential-proxy rotation via iProyal env-based credentials.
 
-See ``db/migrations/003_create_proxies.sql`` for the schema.
+Set in ``.env``:
+    IPROYAL_USERNAME=...
+    IPROYAL_PASSWORD=...
 
-Proxy row format: whatever the provider gives you. Both of these are
-accepted and normalised at import time:
+Each call to ``iter_available_proxies()`` / ``get_random_proxy()`` builds a
+fresh proxy URL from the credentials plus a randomly-picked port + country
+code. iProyal's rotating endpoint serves a different residential IP per
+request, so individual URLs don't need to be tracked in a DB and
+``mark_bad()`` is a no-op.
 
-    host:port:user:pass                 (iProyal / Smartproxy shorthand)
-    http://user:pass@host:port          (standard URL form)
+URL shape (built on the fly):
+    geo.iproyal.com:{PORT}:{USER}:{PASS}_country-{COUNTRY}
 
-Storing the shorthand as-is is convenient because you can paste dealer-
-provided proxy lists straight into the SQL editor without reformatting.
+PORT pool covers iProyal's documented rotating-port ranges (11200-11250
+and 51200-51250). COUNTRY pool is the Akamai-friendly subset proven to
+pass autotrader.com / je.com IP-reputation checks.
 
-Scrapers that need to bypass IP-level bot protection (AutoTrader.com /
-TrueCar / etc.) call ``get_random_proxy()`` to grab a non-bad entry, then
-feed it to both their Playwright context and curl_cffi session. On a
-block, they call ``mark_bad()`` and retry with the next one.
+Scrapers that need IP-level bypass (AutoTrader.com / JE / TrueCar) call
+``get_random_proxy()`` to grab one fresh URL and feed it to both their
+Playwright context and curl_cffi session.
 """
 
 from __future__ import annotations
@@ -25,9 +30,33 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlparse
 
-from .db import get_client
+from .config import IPROYAL_HOST, IPROYAL_PASSWORD, IPROYAL_USERNAME
 
 logger = logging.getLogger(__name__)
+
+# iProyal rotating-endpoint ports. Within each range, every port maps to
+# the same residential pool but a different rotation policy slot — using
+# multiple ports decorrelates concurrent requests from the same vendor.
+_IPROYAL_PORTS: tuple[int, ...] = tuple(
+    list(range(11200, 11251)) + list(range(51200, 51251))
+)
+
+# Countries whose iProyal residential IPs empirically pass Akamai's
+# reputation check on US car-classified sites. Ranked best-first based
+# on prior probe data; randomized at pick time so no single country
+# carries the whole pool's burn risk.
+_IPROYAL_COUNTRIES_DEFAULT: tuple[str, ...] = (
+    # Asia (cleanest, smallest scraper market)
+    "jp", "tw", "kr",
+    # Nordic (premium ISPs, low scraper density)
+    "se", "no", "fi", "dk",
+    # Baltic (small market, premium ISPs)
+    "ee", "lt", "lv",
+    # Central / Eastern Europe (low scraper burn)
+    "cz", "sk", "hu", "bg", "si",
+    # Western Europe outside DE/FR/UK burn cluster
+    "at", "ch", "pt",
+)
 
 
 @dataclass(frozen=True)
@@ -133,45 +162,6 @@ def _parse_shorthand(raw: str) -> ProxyInfo:
     )
 
 
-def get_random_proxy() -> ProxyInfo | None:
-    """Pick a non-bad proxy at random. Returns ``None`` if the table is
-    missing / empty / every proxy has been flagged.
-    """
-    candidates = iter_available_proxies(limit=1000)
-    if not candidates:
-        return None
-    return random.choice(candidates)
-
-
-def mark_bad(proxy_url: str) -> None:
-    """Flip ``is_bad=true`` for the given proxy URL. Idempotent — safe to
-    call repeatedly on the same value.
-
-    Proxies are stored in shorthand form (``host:port:user:pass``) but
-    ``mark_bad`` receives a URL (``http://user:pass@host:port``). We try
-    both the URL form and the reconstructed shorthand so the WHERE clause
-    matches regardless of how the row was originally inserted.
-    """
-    client = get_client()
-    updated = (
-        client.table("proxies")
-        .update({"is_bad": True})
-        .eq("proxy", proxy_url)
-        .execute()
-    )
-    if not (updated.data or []):
-        # URL form didn't match — reconstruct shorthand and retry.
-        try:
-            from urllib.parse import urlparse
-            p = urlparse(proxy_url)
-            if p.hostname and p.port and p.username and p.password:
-                shorthand = f"{p.hostname}:{p.port}:{p.username}:{p.password}"
-                client.table("proxies").update({"is_bad": True}).eq("proxy", shorthand).execute()
-        except Exception:
-            pass
-    logger.info("Marked proxy as bad: %s", _redact(proxy_url))
-
-
 def _redact(url: str) -> str:
     """Hide credentials in logs — keep only scheme + host + port."""
     try:
@@ -181,63 +171,81 @@ def _redact(url: str) -> str:
         return "<proxy>"
 
 
+def _build_iproyal_url(port: int, country: str) -> str:
+    """Compose an iProyal rotating proxy shorthand from env credentials.
+
+    Output shape: ``geo.iproyal.com:{port}:{user}:{pass}_country-{cc}``
+    The password gets a ``_country-<cc>`` suffix that iProyal parses
+    on its side to scope the rotation pool to that country.
+    """
+    cc = country.strip().lower()
+    pwd = f"{IPROYAL_PASSWORD}_country-{cc}" if IPROYAL_PASSWORD else f"_country-{cc}"
+    return f"{IPROYAL_HOST}:{port}:{IPROYAL_USERNAME}:{pwd}"
+
+
 def iter_available_proxies(
     limit: int = 3,
     country_allow: list[str] | None = None,
 ) -> list[ProxyInfo]:
-    """Return up to ``limit`` non-bad proxies in random order.
+    """Generate ``limit`` fresh iProyal rotating proxies.
 
-    ``country_allow`` (optional) filters to proxies whose stored string
-    contains ``country-<cc>`` — iProyal / Smartproxy / most residential
-    providers embed the country code in either the password or a subdomain.
-    Use for scrapers where only certain country pools pass the target's
-    IP reputation checks (e.g. AutoTrader.com passes JP/PL but hard-blocks
-    US/AR residentials).
+    Each entry is built on the fly from ``IPROYAL_USERNAME`` / ``IPROYAL_PASSWORD``
+    + a random (port, country) pick. iProyal's rotating endpoint serves a
+    different residential IP per request, so callers don't need to track
+    which entries they've used — every iter call produces uniquely-routed
+    proxies.
 
-    Returns ``[]`` (not raise) when the ``proxies`` table doesn't exist
-    yet — the scraper's error message then tells the user what to run.
+    ``country_allow`` narrows the country pool (e.g. AutoTrader's
+    Akamai-friendly subset). When ``None`` we use the project's default
+    Akamai-friendly list. Unknown country codes are dropped silently.
+
+    Returns ``[]`` if IPROYAL credentials aren't configured.
     """
-    client = get_client()
-    # PostgREST caps a single SELECT at 1000 rows by default. With a 5k+
-    # proxy pool we have to page through ``.range()`` to see every
-    # country slice, otherwise scrapers always get the same first-1000
-    # bias and the country_allow filter mismatches what's actually in
-    # the DB.
-    PAGE = 1000
-    rows: list[dict] = []
-    start = 0
-    try:
-        while True:
-            end = start + PAGE - 1
-            batch = (
-                client.table("proxies")
-                .select("proxy")
-                .eq("is_bad", False)
-                .range(start, end)
-                .execute()
-            )
-            page_rows = batch.data or []
-            if not page_rows:
-                break
-            rows.extend(page_rows)
-            if len(page_rows) < PAGE:
-                break
-            start += PAGE
-    except Exception as e:
+    if not (IPROYAL_USERNAME and IPROYAL_PASSWORD):
         logger.error(
-            "Failed to query 'proxies' table (does it exist?): %s", e,
+            "iProyal credentials missing — set IPROYAL_USERNAME / "
+            "IPROYAL_PASSWORD in .env to use rotating residential proxies.",
         )
         return []
 
+    countries: tuple[str, ...]
     if country_allow:
-        wanted = tuple(f"country-{cc.lower()}" for cc in country_allow)
-        rows = [r for r in rows if any(tok in r["proxy"].lower() for tok in wanted)]
+        # Keep only countries also in the Akamai-friendly default list, in
+        # the caller's preferred order. Falls back to the full pool if the
+        # caller's list has no overlap (better than returning nothing).
+        wanted = tuple(c.lower() for c in country_allow)
+        intersection = tuple(c for c in wanted if c in _IPROYAL_COUNTRIES_DEFAULT)
+        countries = intersection or _IPROYAL_COUNTRIES_DEFAULT
+    else:
+        countries = _IPROYAL_COUNTRIES_DEFAULT
 
-    random.shuffle(rows)
     out: list[ProxyInfo] = []
-    for row in rows[:limit]:
+    for _ in range(max(0, limit)):
+        port = random.choice(_IPROYAL_PORTS)
+        country = random.choice(countries)
         try:
-            out.append(_parse(row["proxy"]))
+            out.append(_parse_shorthand(_build_iproyal_url(port, country)))
         except ValueError as e:
-            logger.warning("Skipping malformed proxy: %s", e)
+            logger.warning("Skipping malformed generated proxy: %s", e)
     return out
+
+
+def get_random_proxy() -> ProxyInfo | None:
+    """Generate one fresh iProyal rotating proxy. ``None`` if creds unset."""
+    proxies = iter_available_proxies(limit=1)
+    return proxies[0] if proxies else None
+
+
+def mark_bad(proxy_url: str) -> None:
+    """No-op for the env-generated rotating-proxy backend.
+
+    iProyal rotates IPs per request, so a single URL never identifies
+    a persistent "bad" endpoint — every call hits a different IP. We
+    keep the function so existing callers don't need to be touched;
+    they can still call it after a failed warmup. Logged at DEBUG level
+    so it's visible when troubleshooting but doesn't spam at INFO.
+    """
+    logger.debug(
+        "mark_bad called on rotating-proxy URL (no-op): %s",
+        _redact(proxy_url),
+    )
