@@ -74,7 +74,7 @@ _AUCTION_SOURCES = [
     # yet have upcoming-mode code stay past-only.
     ("rms",         ["past", "upcoming"], "RM Sotheby's"),
     ("bon",         ["past", "upcoming"], "Bonhams"),
-    ("gooding",     None,                 "Gooding & Company"),
+    ("gooding",     ["past", "upcoming"], "Gooding & Company"),
     ("broadarrow",  ["past", "upcoming"], "Broad Arrow Auctions"),
     ("worldwide",   None,                 "Worldwide Auctioneers"),
 ]

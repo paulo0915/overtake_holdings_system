@@ -353,6 +353,7 @@ def parse_lot_page_data(payload: dict[str, Any], *, path: str) -> dict[str, Any]
 
     auction = lot.get("auction") or {}
     auction_name = auction.get("name")
+    auction_contentful_id = auction.get("contentful_id")
     currency = (auction.get("currency") or "USD").upper()
     selling_date = _auction_date_from_subevents(auction.get("subEvents"))
 
@@ -449,6 +450,7 @@ def parse_lot_page_data(payload: dict[str, Any], *, path: str) -> dict[str, Any]
         "mileage_mi": mileage_mi,
         "lot_number": str(lot.get("lotNumber")) if lot.get("lotNumber") is not None else None,
         "auction_name": auction_name,
+        "auction_contentful_id": auction_contentful_id,
         "currency": currency,
         "selling_date": selling_date,
         "sale_price": sale_price,

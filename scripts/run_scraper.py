@@ -479,12 +479,14 @@ def main() -> None:
 
     elif args.source == "gooding":
         from scrapers.event.gooding.scraper import GoodingScraper
+        gooding_mode = args.mode if args.mode in ("past", "upcoming") else "past"
         scraper = GoodingScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
             max_pages=args.max_pages,
             vehicle_filter=vehicle_filter,
+            mode=gooding_mode,
         )
         records = asyncio.run(scraper.run())
 

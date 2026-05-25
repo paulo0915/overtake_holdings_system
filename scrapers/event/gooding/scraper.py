@@ -28,10 +28,14 @@ from shared.schemas import AUCTION_COLUMNS
 from . import record_builder
 from .api_client import (
     fetch_app_js,
+    fetch_auction_html,
     fetch_home_html,
     fetch_lots_page_data,
     fetch_page_data,
     find_app_js_path,
+    iter_upcoming_vehicles_graphql,
+    parse_early_consignments_filters,
+    parse_navbar_auction_paths,
 )
 from .listing_parser import (
     extract_paths_from_app_js,
@@ -44,15 +48,30 @@ logger = logging.getLogger(__name__)
 
 
 class GoodingScraper(BaseScraper):
-    """Past results from [Gooding & Company](https://www.goodingco.com)."""
+    """Gooding & Company scraper.
+
+    ``mode='past'`` (default) — iterate every lot in the app.js bundle and
+    keep the sold ones with a hammer price.
+    ``mode='upcoming'`` — discover auctions from the homepage navbar, keep
+    only those with a 'View Early Consignments' button. For each, replay the
+    site's ``GetVehiclesAndFilters`` GraphQL persisted query to discover
+    early-consignment lot slugs (these lots are NOT in the app.js bundle
+    yet), then fetch each lot's page-data the same way past mode does.
+    """
 
     SOURCE_NAME = "Gooding & Company"
     SOURCE_DOMAIN = "goodingco.com"
     DATABASE = "auctions"
 
+    def __init__(self, *args, mode: str = "past", **kwargs):
+        super().__init__(*args, **kwargs)
+        if mode not in ("past", "upcoming"):
+            raise ValueError(f"Gooding mode must be 'past' or 'upcoming', got {mode!r}")
+        self.mode = mode
+
     async def run(self) -> list[dict]:
         logger.info("=" * 60)
-        logger.info("Gooding & Company - Starting")
+        logger.info("Gooding & Company (%s) - Starting", self.mode.upper())
         logger.info("Min price (USD): $%s", f"{self.min_price:,}")
         logger.info("Concurrency: %s", self.max_concurrent)
         logger.info("Vehicle filter: %s", "active" if self.vehicle_filter else "disabled")
@@ -62,6 +81,9 @@ class GoodingScraper(BaseScraper):
         logger.info("=" * 60)
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.mode == "upcoming":
+            return await self._run_upcoming()
 
         async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT) as client:
 
@@ -173,3 +195,124 @@ class GoodingScraper(BaseScraper):
             return int(usd) >= self.min_price
         except (TypeError, ValueError):
             return False
+
+    # --- Upcoming mode -----------------------------------------------------
+
+    async def _run_upcoming(self) -> list[dict]:
+        """Scrape preview catalogues for upcoming Gooding auctions.
+
+        Flow:
+          1. Parse homepage navbar for ``/auction/<slug>`` paths.
+          2. For each, fetch the auction HTML and parse the
+             'View Early Consignments' button's href to extract its
+             ``filtersInput`` query (``liveAuctionVenue`` + ``auctionYear``
+             + ``auctionType``). Auctions without that button are skipped.
+          3. Replay the site's ``GetVehiclesAndFilters`` GraphQL persisted
+             query with those filters — returns vehicles with their static
+             slugs. (Early-consignment lots are NOT in the app.js bundle
+             yet, which is why we can't use bundle discovery here.)
+          4. For each ``/lot/<slug>``, fetch the per-lot page-data and parse
+             the same way past mode does.
+          5. Build records with ``Auction_status='Upcoming'``. Min-price
+             gate is SKIPPED — upcoming lots have no hammer price.
+        """
+        async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT) as client:
+            # 1) navbar → /auction paths
+            home_html = await fetch_home_html(client)
+            auction_paths = parse_navbar_auction_paths(home_html)
+            if not auction_paths:
+                logger.warning("Gooding upcoming: no /auction/* paths in navbar")
+                return []
+            logger.info("Navbar auctions: %s", auction_paths)
+
+            # 2 + 3) per-auction: parse EC filters, call GraphQL
+            seen_slugs: set[str] = set()
+            lot_paths: list[str] = []
+            for path in auction_paths:
+                try:
+                    ah = await fetch_auction_html(client, path=path)
+                except Exception as e:
+                    logger.warning("  %s HTML fetch failed: %s — skipping", path, e)
+                    continue
+                ec = parse_early_consignments_filters(ah)
+                if not ec:
+                    logger.info(
+                        "  %s: no Early Consignments button — past/far-future, skipping",
+                        path,
+                    )
+                    continue
+                logger.info("  %s: EC filters=%s sort=%s", path, ec["filters"], ec["sort_by"])
+                try:
+                    vehicles = await iter_upcoming_vehicles_graphql(
+                        client, filters=ec["filters"], sort_by=ec["sort_by"],
+                    )
+                except Exception as e:
+                    logger.warning("  %s GraphQL failed: %s — skipping", path, e)
+                    continue
+                added = 0
+                for v in vehicles:
+                    slug = (v.get("slug") or "").strip()
+                    if not slug or slug in seen_slugs:
+                        continue
+                    seen_slugs.add(slug)
+                    lot_paths.append(f"/lot/{slug}")
+                    added += 1
+                logger.info("  %s: %s vehicles from GraphQL (%s new)", path, len(vehicles), added)
+                await asyncio.sleep(REQUEST_DELAY_SECONDS * 0.2 + random.uniform(0.05, 0.2))
+
+            if not lot_paths:
+                logger.warning("Gooding upcoming: no early-consignment lots discovered")
+                return []
+            logger.info("Total upcoming lot paths: %s", len(lot_paths))
+
+            if self.max_pages > 0:
+                lot_paths = lot_paths[: self.max_pages]
+                logger.info("Test mode: capping to %s lot(s)", len(lot_paths))
+
+            # 4) concurrent per-lot page-data fetches (same as past mode)
+            detail_conc = max(1, min(self.max_concurrent, 8))
+            sem = asyncio.Semaphore(detail_conc)
+            rows: list[dict] = []
+            done = 0
+            total = len(lot_paths)
+            lock = asyncio.Lock()
+
+            async def one(path: str) -> None:
+                nonlocal done
+                async with sem:
+                    try:
+                        payload = await fetch_page_data(client, path=path)
+                        row = parse_lot_page_data(payload, path=path)
+                    except Exception as e:
+                        logger.debug("  lot %s failed: %s", path, e)
+                        row = None
+                    async with lock:
+                        done += 1
+                        if row:
+                            rows.append(row)
+                        if done % 50 == 0 or done == total:
+                            logger.info("Lot fetch %s/%s (rows=%s)", done, total, len(rows))
+                await asyncio.sleep(REQUEST_DELAY_SECONDS * 0.08 + random.uniform(0.01, 0.1))
+
+            await asyncio.gather(*(one(p) for p in lot_paths))
+            logger.info("Collected %s upcoming-lot rows — building records", len(rows))
+
+            # 5) build records
+            fx = FXConverter(client)
+            scraped_at = get_scraped_at()
+            records = await record_builder.build_records(
+                rows, fx, self.vehicle_filter, scraped_at, mode="upcoming",
+            )
+
+        # write — upcoming has no realised price; skip min-price gate
+        csv_path = self.output_dir / "gooding_upcoming.csv"
+        xlsx_path = self.output_dir / "gooding_upcoming.xlsx"
+        export_to_csv(records, csv_path, AUCTION_COLUMNS)
+        export_to_excel(records, xlsx_path, AUCTION_COLUMNS)
+
+        logger.info("Output CSV:   %s", csv_path.resolve())
+        logger.info("Output Excel: %s", xlsx_path.resolve())
+        logger.info("=" * 60)
+        logger.info("Gooding & Company (UPCOMING) - Complete: %s records", len(records))
+        logger.info("=" * 60)
+        return records

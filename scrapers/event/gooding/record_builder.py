@@ -14,8 +14,16 @@ async def build_records(
     fx_converter: FXConverter,
     vehicle_filter,
     scraped_at: str,
+    *,
+    mode: str = "past",
 ) -> list[dict[str, Any]]:
-    """Sold-only: drop non-Car lots, unsold, and sold-but-no-salePrice."""
+    """Convert merged page-data rows to canonical ``AUCTION_COLUMNS``.
+
+    ``mode='past'``     — sold-only: drop non-Car lots, unsold, and sold-but-no-salePrice.
+    ``mode='upcoming'`` — preview lots: salePrice expected to be None, estimates ARE
+                         populated (Gooding publishes lowEstimate/highEstimate),
+                         Auction_status='Upcoming'.
+    """
     records: list[dict[str, Any]] = []
     skipped = {"filter": 0, "dup": 0, "non_car": 0, "unsold": 0, "sold_no_price": 0}
     seen: set[str] = set()
@@ -50,6 +58,10 @@ async def build_records(
             if not vehicle_filter.match(title, ""):
                 skipped["filter"] += 1
                 continue
+
+        if mode == "upcoming":
+            records.append(_build_upcoming_row(m, rid, scraped_at))
+            continue
 
         sale_price = m.get("sale_price")
         # Gooding has no explicit status field — salePrice presence means it sold.
@@ -105,3 +117,44 @@ async def build_records(
         if v:
             logger.info("Skipped %s (%s)", v, k)
     return records
+
+
+def _build_upcoming_row(
+    m: dict[str, Any], rid: str, scraped_at: str,
+) -> dict[str, Any]:
+    """One upcoming-lot row. Gooding publishes pre-sale estimates so the
+    Estimate_* columns are populated; Selling_* stay blank until hammer."""
+    currency = (m.get("currency") or "USD").strip().upper() or "USD"
+    has_est = m.get("estimate_low") is not None or m.get("estimate_high") is not None
+    return {
+        "Record_ID": rid,
+        "Title": m.get("title") or None,
+        "Year": m.get("year"),
+        "Make": m.get("make"),
+        "Model": m.get("model"),
+        "VIN": m.get("vin"),
+        "Mileage_mi": m.get("mileage_mi"),
+        "Ext_color": m.get("ext_color"),
+        "Int_color": m.get("int_color"),
+        "Engine_spec": m.get("engine_spec"),
+        "Transmission": m.get("transmission"),
+        "Lot_number": m.get("lot_number"),
+        "Estimate_low": m.get("estimate_low"),
+        "Estimate_high": m.get("estimate_high"),
+        "Estimate_currency": currency if has_est else None,
+        "Sold_status": None,
+        "Auction_status": "Upcoming",
+        "Currency": currency,
+        "Selling_price": None,
+        "Selling_price_USD": None,
+        "FX_rate_used": None,
+        "Selling_date": m.get("selling_date"),  # future auction date
+        "Auction_house": "Gooding & Company",
+        "Auction_event": m.get("auction_name"),
+        "Country": "USA",
+        "Image_url": m.get("image_url"),
+        "Listing_url": m.get("listing_url"),
+        "Source": "goodingco.com",
+        "Listing_description": m.get("description"),
+        "Scraped_at": scraped_at,
+    }
