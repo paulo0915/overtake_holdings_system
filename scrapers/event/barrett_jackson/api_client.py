@@ -13,7 +13,12 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from shared.config import REQUEST_TIMEOUT, get_headers
 
-from .config import RESULTS_API_PATH, SITE_ORIGIN
+from .config import (
+    RESULTS_API_PATH,
+    SITE_ORIGIN,
+    UPCOMING_DOCKET_API_PATH,
+    UPCOMING_EVENT_STATUS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +26,15 @@ logger = logging.getLogger(__name__)
 # City names are 1–3 lowercase-alpha words; no digits in the city portion.
 _EVENT_HREF_RE = re.compile(
     r'href=["\']/(20\d\d-(?:[a-z]+(?:-[a-z]+){0,2}))["\']',
+)
+
+# Same pattern but specifically scoped to the /docket subpath. The /auctions
+# schedule page renders "View docket" as a real anchor only for events that
+# have already published their preview catalog; future events render plain
+# "View docket (Coming soon)" text with no link. Matching ``/docket`` here
+# means we only see the events we can actually scrape.
+_EVENT_DOCKET_HREF_RE = re.compile(
+    r'href=["\']/(20\d\d-(?:[a-z]+(?:-[a-z]+){0,2}))/docket["\']',
 )
 
 AUCTIONS_SCHEDULE_PATH = "/auctions"
@@ -167,4 +181,98 @@ async def fetch_previous_docket_page(
     data = resp.json()
     if not isinstance(data, dict) or "data" not in data:
         raise RuntimeError(f"Unexpected BJ API response shape on page {page}")
+    return data
+
+
+# --- Upcoming-auction discovery + per-event docket -------------------------
+
+
+async def discover_upcoming_event_slugs(client: httpx.AsyncClient) -> list[str]:
+    """Return event slugs whose preview docket is published.
+
+    Scrapes ``/auctions`` for ``href="/YYYY-{city}/docket"`` anchors. Events
+    in the more distant future render plain ``"View docket (Coming soon)"``
+    text without an anchor; this regex naturally skips them. Order preserved
+    to match what the schedule page lists (typically chronological).
+    """
+    schedule_url = f"{SITE_ORIGIN}{AUCTIONS_SCHEDULE_PATH}"
+    try:
+        html_headers = get_headers(accept="text/html", referer=SITE_ORIGIN)
+        resp = await client.get(schedule_url, headers=html_headers, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        html = resp.text
+    except Exception as exc:
+        logger.warning("BJ upcoming discovery: /auctions fetch failed: %s", exc)
+        return []
+
+    seen: set[str] = set()
+    slugs: list[str] = []
+    for m in _EVENT_DOCKET_HREF_RE.finditer(html):
+        slug = m.group(1)
+        if slug in seen:
+            continue
+        seen.add(slug)
+        slugs.append(slug)
+    logger.info(
+        "BJ upcoming discovery: %s event(s) with published docket: %s",
+        len(slugs), slugs,
+    )
+    return slugs
+
+
+def _upcoming_query_params(
+    *, slug: str, page: int, page_size: int,
+) -> dict[str, str]:
+    """Mirror the browser's ``/api/docket?slug=…&page=…&size=…`` query string."""
+    return {
+        "page": str(page),
+        "type": "Vehicles",
+        "size": str(page_size),
+        "slug": slug,
+        "q": "",
+        "make": "",
+        "model": "",
+        "year": "",
+        "is_reserve": "",
+        "collection": "",
+        "dayOfWeek": "",
+        "charity": "",
+        "lot": "",
+        "can_preview": "true",
+        "engine_size": "",
+        "interior_color": "",
+        "exterior_color": "",
+        "transmission_type_name": "",
+        "number_of_cylinders": "",
+        "validateLot": "0",
+        "eventStatus": UPCOMING_EVENT_STATUS,
+        "orderBy": "",
+    }
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=12),
+    retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TransportError, httpx.TimeoutException)),
+)
+async def fetch_upcoming_docket_page(
+    client: httpx.AsyncClient,
+    *,
+    slug: str,
+    page: int,
+    page_size: int,
+) -> dict[str, Any]:
+    """One page of ``/api/docket`` for a single upcoming event slug."""
+    params = _upcoming_query_params(slug=slug, page=page, page_size=page_size)
+    url = f"{SITE_ORIGIN}{UPCOMING_DOCKET_API_PATH}?{urlencode(params)}"
+    headers = get_headers(
+        accept="application/json",
+        referer=f"{SITE_ORIGIN}/{slug}/docket?page={page}&type=Vehicles",
+    )
+    headers["Origin"] = SITE_ORIGIN
+    resp = await client.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, dict) or "data" not in data:
+        raise RuntimeError(f"Unexpected BJ /api/docket shape for {slug!r} page {page}")
     return data

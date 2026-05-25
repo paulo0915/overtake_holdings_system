@@ -67,13 +67,16 @@ _AUCTION_SOURCES = [
     ("tmkt",        None,           "The Market (themarket.co.uk)"),
     ("cac",         ["past"],       "Car & Classic"),
     # -- Event --------------------------------------------------------------
-    ("barrett",     ["past"],       "Barrett-Jackson"),
-    ("mecum",       ["past"],       "Mecum Auctions"),
-    ("rms",         ["past"],       "RM Sotheby's"),
-    ("bon",         ["past"],       "Bonhams"),
-    ("gooding",     None,           "Gooding & Company"),
-    ("broadarrow",  ["past"],       "Broad Arrow Auctions"),
-    ("worldwide",   None,           "Worldwide Auctioneers"),
+    ("barrett",     ["past", "upcoming"], "Barrett-Jackson"),
+    ("mecum",       ["past", "upcoming"], "Mecum Auctions"),
+    # Sources with both past+upcoming modes are listed with both so the
+    # --auction-mode flag below can pick which to run. Sources that don't
+    # yet have upcoming-mode code stay past-only.
+    ("rms",         ["past", "upcoming"], "RM Sotheby's"),
+    ("bon",         ["past", "upcoming"], "Bonhams"),
+    ("gooding",     None,                 "Gooding & Company"),
+    ("broadarrow",  ["past", "upcoming"], "Broad Arrow Auctions"),
+    ("worldwide",   None,                 "Worldwide Auctioneers"),
 ]
 
 _CLASSIFIEDS_SOURCES = [
@@ -260,6 +263,18 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--auction-mode", choices=["past", "upcoming", "both"], default="past",
+        help=(
+            "Which mode to run for event-auction sources (rms / bon / "
+            "broadarrow / cac). ``past`` = sold lots with hammer prices "
+            "(default, backwards-compatible). ``upcoming`` = currently-"
+            "scheduled lots with pre-sale estimates only. ``both`` = run "
+            "each supported source twice (once per mode). Sources without "
+            "upcoming support are run only when --auction-mode allows "
+            "their available mode."
+        ),
+    )
+    parser.add_argument(
         "--gooding-pages", type=int, default=None,
         help="Override --max-pages for Gooding only (e.g. --gooding-pages 10)",
     )
@@ -344,6 +359,21 @@ def main() -> None:
         _reset_db()
 
     # -- 2. Build run plan -------------------------------------------------
+    # ``--auction-mode`` filter: when a source's mode list contains the
+    # past/upcoming keywords, narrow to whichever the caller asked for.
+    # Sources whose modes are unrelated (e.g. classifieds' used/new/all)
+    # or modes=None (daily/monthly sold-only scrapers) are unaffected.
+    def _apply_auction_mode_filter(modes: list[str] | None) -> list[str] | None:
+        if modes is None:
+            return None
+        has_pu = any(m in ("past", "upcoming") for m in modes)
+        if not has_pu:
+            return modes  # used/new/all-style modes are untouched
+        if args.auction_mode == "both":
+            return [m for m in modes if m in ("past", "upcoming")]
+        # past or upcoming — return [requested] only if the source supports it
+        return [args.auction_mode] if args.auction_mode in modes else []
+
     all_sources = _AUCTION_SOURCES + _CLASSIFIEDS_SOURCES
     plan: list[tuple[str, str | None, str]] = []
     for code, modes, desc in all_sources:
@@ -351,8 +381,12 @@ def main() -> None:
             continue
         if code in skip:
             continue
-        if modes:
-            for m in modes:
+        filtered_modes = _apply_auction_mode_filter(modes)
+        if filtered_modes == []:
+            print(f"  skip {code:25s}  (no {args.auction_mode!r} mode support)")
+            continue
+        if filtered_modes:
+            for m in filtered_modes:
                 plan.append((code, m, desc))
         else:
             plan.append((code, None, desc))
@@ -369,6 +403,7 @@ def main() -> None:
     print(f"  Filter    : {'OFF' if args.no_filter else 'ON (default)'}")
     print(f"  Workers   : {args.workers} ({'sequential' if args.workers == 1 else 'parallel'})")
     print(f"  Coverage  : {'ON' if args.coverage_check else 'OFF (default for full runs)'}")
+    print(f"  Auction   : --auction-mode={args.auction_mode}")
     print()
 
     # -- 3. Execute --------------------------------------------------------

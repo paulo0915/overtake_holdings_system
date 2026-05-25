@@ -406,23 +406,27 @@ def main() -> None:
 
     elif args.source == "mecum":
         from scrapers.event.mecum.scraper import MecumScraper
+        mecum_mode = args.mode if args.mode in ("past", "upcoming") else "past"
         scraper = MecumScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
             max_pages=args.max_pages,
             vehicle_filter=vehicle_filter,
+            mode=mecum_mode,
         )
         records = asyncio.run(scraper.run())
 
     elif args.source == "barrett":
         from scrapers.event.barrett_jackson.scraper import BarrettJacksonScraper
+        bj_mode = args.mode if args.mode in ("past", "upcoming") else "past"
         scraper = BarrettJacksonScraper(
             min_price=min_price,
             output_dir=args.output_dir,
             max_concurrent=max_concurrent,
             max_pages=args.max_pages,
             vehicle_filter=vehicle_filter,
+            mode=bj_mode,
         )
         records = asyncio.run(scraper.run())
 

@@ -17,7 +17,18 @@ async def build_records(
     fx_converter: FXConverter,
     vehicle_filter,
     scraped_at: str,
+    *,
+    mode: str = "past",
 ) -> list[dict[str, Any]]:
+    """Merge Algolia hits + per-lot HTML into canonical AUCTION_COLUMNS rows.
+
+    ``mode='past'``     — hammer-priced sold lots; Auction_status='Completed'.
+    ``mode='upcoming'`` — preview lots; Auction_status='Upcoming',
+                         Selling_price/USD/FX blank, Selling_date is the
+                         future run-date (when the lot will cross the block).
+                         Mecum doesn't publish pre-sale estimates, so the
+                         Estimate_* columns stay blank too.
+    """
     records: list[dict[str, Any]] = []
     skipped = {"filter": 0, "dup": 0}
     seen: set[str] = set()
@@ -45,6 +56,10 @@ async def build_records(
 
         base_desc = m.get("listing_description")
         enrich_vin_and_transmission_from_description(m, base_desc)
+
+        if mode == "upcoming":
+            records.append(_build_upcoming_row(m, wid, title, base_desc, scraped_at))
+            continue
 
         hammer = m.get("hammer_usd")
         sold_status = (m.get("sold_status") or "Sold").strip() or "Sold"
@@ -99,3 +114,42 @@ async def build_records(
         if v:
             logger.info("Skipped %s (%s)", v, k)
     return records
+
+
+def _build_upcoming_row(
+    m: dict[str, Any], wid: str, title: str, base_desc: str | None, scraped_at: str,
+) -> dict[str, Any]:
+    """One upcoming-lot row. Selling fields blank; Selling_date holds the
+    future run-date so analysts can sort by scheduled-sale order."""
+    return {
+        "Record_ID": wid,
+        "Title": m.get("title") or title,
+        "Year": m.get("year"),
+        "Make": m.get("make"),
+        "Model": m.get("model"),
+        "VIN": m.get("vin"),
+        "Mileage_mi": m.get("mileage_mi"),
+        "Ext_color": m.get("ext_color"),
+        "Int_color": m.get("int_color"),
+        "Engine_spec": m.get("engine_spec"),
+        "Transmission": m.get("transmission"),
+        "Lot_number": m.get("lot_number"),
+        "Estimate_low": None,
+        "Estimate_high": None,
+        "Estimate_currency": None,
+        "Sold_status": None,
+        "Auction_status": "Upcoming",
+        "Currency": "USD",
+        "Selling_price": None,
+        "Selling_price_USD": None,
+        "FX_rate_used": None,
+        "Selling_date": m.get("selling_date"),  # future run_date
+        "Auction_house": "Mecum",
+        "Auction_event": m.get("auction_event"),
+        "Country": "USA",
+        "Image_url": m.get("image_url"),
+        "Listing_url": m.get("listing_url"),
+        "Source": "mecum.com",
+        "Listing_description": base_desc,
+        "Scraped_at": scraped_at,
+    }

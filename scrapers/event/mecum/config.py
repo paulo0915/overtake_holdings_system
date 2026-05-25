@@ -23,6 +23,17 @@ LOT_INDEX_NAME = "wp_posts_lot_highest_bid_desc"
 # fitting comfortably in one response payload.
 HITS_PER_PAGE = 96
 
+# Upcoming-auction index — the browser uses this when viewing a future
+# auction's published catalog. Sorted by ``feature_sort_meta`` ascending
+# (sticky / featured lots first, then numeric lot order), which is fine
+# for our purposes since we paginate the whole auction anyway.
+UPCOMING_LOT_INDEX_NAME = "wp_posts_lot_feature_sort_asc"
+
+# Auctions overview page — we scrape it to learn which upcoming events
+# have published their lot catalogue ("View Lots" anchor). Far-future
+# events render no anchor and are skipped.
+AUCTIONS_OVERVIEW_PATH = "/auctions/"
+
 # Mirrors the site filter: past / ended lots with sold facet + time window.
 def run_date_timestamp_ceiling() -> int:
     """Unix timestamp upper bound for ``taxonomies.run_date.timestamp`` clause (rolling)."""

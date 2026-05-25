@@ -16,7 +16,12 @@ from shared.normalizer import get_scraped_at
 from shared.schemas import AUCTION_COLUMNS
 
 from . import record_builder
-from .api_client import discover_non_included_slugs, fetch_previous_docket_page
+from .api_client import (
+    discover_non_included_slugs,
+    discover_upcoming_event_slugs,
+    fetch_previous_docket_page,
+    fetch_upcoming_docket_page,
+)
 from .config import DEFAULT_PAGE_SIZE, DEFAULT_RESULT_TYPE, DEFAULT_SORT
 from .listing_parser import parse_docket_entry
 
@@ -24,15 +29,26 @@ logger = logging.getLogger(__name__)
 
 
 class BarrettJacksonScraper(BaseScraper):
-    """Past auction results from [Barrett-Jackson](https://www.barrett-jackson.com)."""
+    """Auction results from [Barrett-Jackson](https://www.barrett-jackson.com).
+
+    ``mode='past'`` (default) — fetches sold lots via ``/api/previous-docket-results``.
+    ``mode='upcoming'`` — discovers events with published preview dockets on
+    ``/auctions``, then paginates ``/api/docket`` per event slug.
+    """
 
     SOURCE_NAME = "Barrett-Jackson"
     SOURCE_DOMAIN = "barrett-jackson.com"
     DATABASE = "auctions"
 
+    def __init__(self, *args, mode: str = "past", **kwargs):
+        super().__init__(*args, **kwargs)
+        if mode not in ("past", "upcoming"):
+            raise ValueError(f"Barrett-Jackson mode must be 'past' or 'upcoming', got {mode!r}")
+        self.mode = mode
+
     async def run(self) -> list[dict]:
         logger.info("=" * 60)
-        logger.info("Barrett-Jackson - Starting")
+        logger.info("Barrett-Jackson (%s) - Starting", self.mode.upper())
         logger.info("Min price (USD): $%s", f"{self.min_price:,}")
         logger.info("Vehicle filter: %s", "active" if self.vehicle_filter else "disabled")
         if self.max_pages > 0:
@@ -40,6 +56,10 @@ class BarrettJacksonScraper(BaseScraper):
         logger.info("=" * 60)
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.mode == "upcoming":
+            return await self._run_upcoming()
+
         rows: list[dict] = []
 
         async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT) as client:
@@ -169,3 +189,87 @@ class BarrettJacksonScraper(BaseScraper):
             return int(usd) >= self.min_price
         except (TypeError, ValueError):
             return False
+
+    # --- Upcoming mode -------------------------------------------------
+
+    async def _run_upcoming(self) -> list[dict]:
+        """Scrape upcoming dockets from ``/api/docket``.
+
+        Flow: discover event slugs on ``/auctions`` (only events whose
+        preview catalog is published render a ``/docket`` href), then
+        paginate per-event via ``?slug={slug}&page={N}`` until empty.
+
+        Min-price filter is best-effort only — upcoming lots have no
+        hammer or estimate from this source, so we keep all rows unless
+        the caller explicitly sets ``min_price > 0``, in which case we
+        skip the floor check (there's nothing to compare against).
+        """
+        rows: list[dict] = []
+
+        async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT) as client:
+            slugs = await discover_upcoming_event_slugs(client)
+            if not slugs:
+                logger.warning("BJ upcoming: no events with published dockets found")
+                return []
+            if self.max_pages > 0 and len(slugs) > self.max_pages:
+                # Reuse max_pages as an event cap in test mode (matches the
+                # convention used by other event-auction scrapers).
+                logger.info("BJ upcoming: capping at %s events (test mode)", self.max_pages)
+                slugs = slugs[: self.max_pages]
+
+            for idx, slug in enumerate(slugs, start=1):
+                logger.info("[%s/%s] Fetching upcoming docket: %s", idx, len(slugs), slug)
+                page = 1
+                while True:
+                    try:
+                        data = await fetch_upcoming_docket_page(
+                            client, slug=slug, page=page, page_size=DEFAULT_PAGE_SIZE,
+                        )
+                    except Exception as e:
+                        logger.warning("BJ upcoming %s page %s failed: %s", slug, page, e)
+                        break
+
+                    items = data.get("data") or []
+                    if not items:
+                        break
+                    page_added = 0
+                    for item in items:
+                        row = parse_docket_entry(item)
+                        if row:
+                            rows.append(row)
+                            page_added += 1
+                    logger.info(
+                        "  %s page %s: %s items, total rows %s",
+                        slug, page, page_added, len(rows),
+                    )
+                    # Pagination heuristic: meta.pagination may be present;
+                    # if not, stop when a short page comes back.
+                    meta = data.get("meta") or {}
+                    pag = meta.get("pagination") or {}
+                    page_count = pag.get("pageCount")
+                    if isinstance(page_count, int) and page >= page_count:
+                        break
+                    if len(items) < DEFAULT_PAGE_SIZE:
+                        break
+                    page += 1
+                    await asyncio.sleep(REQUEST_DELAY_SECONDS + random.uniform(0.1, 0.45))
+
+            logger.info("Collected %s upcoming lots; building records", len(rows))
+            fx = FXConverter(client)
+            scraped_at = get_scraped_at()
+            records = await record_builder.build_records(
+                rows, fx, self.vehicle_filter, scraped_at, mode="upcoming",
+            )
+
+        # Upcoming has no realised price to filter on; skip min-price gate.
+        csv_path = self.output_dir / "barrett_jackson_upcoming.csv"
+        xlsx_path = self.output_dir / "barrett_jackson_upcoming.xlsx"
+        export_to_csv(records, csv_path, AUCTION_COLUMNS)
+        export_to_excel(records, xlsx_path, AUCTION_COLUMNS)
+
+        logger.info("Output CSV:   %s", csv_path.resolve())
+        logger.info("Output Excel: %s", xlsx_path.resolve())
+        logger.info("=" * 60)
+        logger.info("Barrett-Jackson (UPCOMING) - Complete: %s records", len(records))
+        logger.info("=" * 60)
+        return records
